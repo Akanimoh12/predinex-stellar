@@ -3,6 +3,7 @@
  * These helpers manage odds calculations, status determinations, and formatting for prediction markets.
  */
 
+import { STACKS_MAINNET, STACKS_TESTNET, type StacksNetwork } from '@stacks/network';
 import { PoolData, ProcessedMarket, MarketStatus } from './market-types';
 
 /**
@@ -119,12 +120,135 @@ export function formatTimeRemaining(blocksRemaining: number | null): string {
 
 /**
  * Retrieves the current block height of the Stacks network.
- * 
- * @note Currently returns a mock value. In production, this should fetch 
- * data from the Stacks API via stacks-api.ts.
- * 
- * @returns Constant mock block height
+ *
+ * This is computed from cached data first (fast path), while live fetching
+ * happens via `fetchCurrentBlockHeightLive()`.
+ */
+
+export const BLOCK_HEIGHT_CACHE_KEY = 'predinex_block_height_v1';
+export const BLOCK_HEIGHT_CACHE_VERSION = 1;
+export const BLOCK_HEIGHT_CACHE_TTL_MS = 30_000;
+
+type BlockHeightCachePayload = {
+  version: number;
+  cachedAt: number;
+  height: number;
+};
+
+function getStacksNetwork(): StacksNetwork {
+  // NEXT_PUBLIC_* is inlined by Next.js; default to mainnet if unset.
+  const networkEnv =
+    typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_NETWORK : undefined;
+  return networkEnv === 'testnet' ? STACKS_TESTNET : STACKS_MAINNET;
+}
+
+function readBlockHeightCache(now: number = Date.now()): {
+  height: number;
+  isFresh: boolean;
+} {
+  if (typeof window === 'undefined') return { height: 0, isFresh: false };
+
+  const raw = window.localStorage.getItem(BLOCK_HEIGHT_CACHE_KEY);
+  if (!raw) return { height: 0, isFresh: false };
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<BlockHeightCachePayload>;
+    if (parsed.version !== BLOCK_HEIGHT_CACHE_VERSION) return { height: 0, isFresh: false };
+    if (typeof parsed.cachedAt !== 'number' || typeof parsed.height !== 'number') {
+      return { height: 0, isFresh: false };
+    }
+
+    const ageMs = now - parsed.cachedAt;
+    if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > BLOCK_HEIGHT_CACHE_TTL_MS) {
+      return { height: 0, isFresh: false };
+    }
+
+    return { height: parsed.height, isFresh: true };
+  } catch {
+    return { height: 0, isFresh: false };
+  }
+}
+
+function writeBlockHeightCache(height: number, now: number = Date.now()): void {
+  if (typeof window === 'undefined') return;
+  const payload: BlockHeightCachePayload = {
+    version: BLOCK_HEIGHT_CACHE_VERSION,
+    cachedAt: now,
+    height,
+  };
+  try {
+    window.localStorage.setItem(BLOCK_HEIGHT_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    // Best-effort only.
+  }
+}
+
+/**
+ * Fast synchronous getter for the cached block height.
+ * Falls back to 0 if there is no fresh cached value.
  */
 export function getCurrentBlockHeight(): number {
-  return 150000; // Mock current block height
+  const cached = readBlockHeightCache();
+  return cached.isFresh ? cached.height : 0;
+}
+
+/**
+ * Live fetch Stacks chain tip block height.
+ * - On success: updates the cache and returns `warning = null`
+ * - On failure: returns a fallback height (cached if present, else 0) and
+ *   a user-facing warning string.
+ */
+export async function fetchCurrentBlockHeightLive(options?: {
+  timeoutMs?: number;
+}): Promise<{ height: number; warning: string | null }> {
+  const timeoutMs = options?.timeoutMs ?? 5000;
+
+  if (typeof window === 'undefined') {
+    return {
+      height: getCurrentBlockHeight(),
+      warning: 'Block height lookup unavailable in this environment.',
+    };
+  }
+
+  const network = getStacksNetwork();
+  const url = `${network.coreApiUrl}/extended/v1/status`;
+
+  try {
+    const controller =
+      typeof AbortController !== 'undefined' ? new AbortController() : undefined;
+    const timeoutId =
+      controller && timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+
+    const res = await fetch(url, controller ? { signal: controller.signal } : undefined);
+    if (timeoutId) window.clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      throw new Error(`Stacks API status failed: ${res.status}`);
+    }
+
+    const data: any = await res.json();
+    const rawHeight =
+      data?.stacks_tip_height ??
+      data?.stacks_block_height ??
+      data?.block_height ??
+      data?.height;
+
+    const height =
+      typeof rawHeight === 'string' ? Number.parseInt(rawHeight, 10) : Number(rawHeight);
+
+    if (!Number.isFinite(height) || height <= 0) {
+      throw new Error('Invalid stacks tip height response');
+    }
+
+    writeBlockHeightCache(height);
+    return { height, warning: null };
+  } catch (e) {
+    const fallbackHeight = getCurrentBlockHeight();
+    const warning =
+      fallbackHeight > 0
+        ? 'Failed to fetch current chain height. Using last known block height for market statuses.'
+        : 'Failed to fetch current chain height. Market statuses and countdowns may be inaccurate.';
+
+    return { height: fallbackHeight, warning };
+  }
 }
