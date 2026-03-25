@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import BettingSection from '../../app/components/BettingSection';
 import * as StacksProvider from '../../app/components/StacksProvider';
@@ -55,7 +55,7 @@ describe('BettingSection', () => {
       signOut: vi.fn(),
     } as any);
 
-    render(<BettingSection pool={mockPool} poolId={0} />);
+    renderWithProviders(<BettingSection pool={mockPool} poolId={0} />);
 
     expect(screen.getByText(/Bet on Outcome A/i)).toBeInTheDocument();
     expect(screen.getByText(/Bet on Outcome B/i)).toBeInTheDocument();
@@ -74,7 +74,7 @@ describe('BettingSection', () => {
       signOut: vi.fn(),
     } as any);
 
-    render(<BettingSection pool={mockPool} poolId={0} />);
+    renderWithProviders(<BettingSection pool={mockPool} poolId={0} />);
 
     expect(screen.getByText('Connect Wallet to Bet')).toBeInTheDocument();
     expect(screen.getByText('Connect Wallet')).toBeInTheDocument();
@@ -92,7 +92,7 @@ describe('BettingSection', () => {
     } as any);
 
     const user = userEvent.setup();
-    render(<BettingSection pool={mockPool} poolId={0} />);
+    renderWithProviders(<BettingSection pool={mockPool} poolId={0} />);
 
     // Try to bet with empty amount
     const betButton = screen.getByText(/Bet on Outcome A/i);
@@ -117,7 +117,7 @@ describe('BettingSection', () => {
     } as any);
 
     const user = userEvent.setup();
-    render(<BettingSection pool={mockPool} poolId={0} />);
+    renderWithProviders(<BettingSection pool={mockPool} poolId={0} />);
 
     const input = screen.getByLabelText(/Enter bet amount/i);
     await user.type(input, '0.05'); // Less than 0.1 STX minimum
@@ -140,10 +140,10 @@ describe('BettingSection', () => {
       signOut: vi.fn(),
     } as any);
 
-    vi.mocked(StacksConnect.openContractCall).mockResolvedValue({} as any);
+    vi.mocked(StacksConnect.openContractCall).mockResolvedValue({} as never);
 
     const user = userEvent.setup();
-    render(<BettingSection pool={mockPool} poolId={0} />);
+    renderWithProviders(<BettingSection pool={mockPool} poolId={0} />);
 
     const input = screen.getByLabelText(/Enter bet amount/i);
     await user.type(input, '1.5');
@@ -182,7 +182,7 @@ describe('BettingSection', () => {
     );
 
     const user = userEvent.setup();
-    render(<BettingSection pool={mockPool} poolId={0} />);
+    renderWithProviders(<BettingSection pool={mockPool} poolId={0} />);
 
     const input = screen.getByLabelText(/Enter bet amount/i);
     await user.type(input, '1.0');
@@ -193,10 +193,19 @@ describe('BettingSection', () => {
     // Check if loading state is shown (button should be disabled)
     await waitFor(() => {
       const buttons = screen.getAllByRole('button');
-      const disabledButtons = buttons.filter(btn => btn.hasAttribute('disabled'));
+      const disabledButtons = buttons.filter((btn: HTMLElement) => btn.hasAttribute('disabled'));
       expect(disabledButtons.length).toBeGreaterThan(0);
     });
   });
+
+  it('renders without provider errors when wrapped in ToastProvider', () => {
+    vi.mocked(StacksProvider.useStacks).mockReturnValue({
+      userData: null,
+      authenticate: vi.fn(),
+      signOut: vi.fn(),
+    });
+
+    // Should not throw a "useToast must be used within a ToastProvider" error
+    expect(() => renderWithProviders(<BettingSection pool={mockPool} poolId={0} />)).not.toThrow();
+  });
 });
-
-
