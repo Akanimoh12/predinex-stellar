@@ -4,13 +4,17 @@ import AuthGuard from "../../components/AuthGuard";
 import PortfolioOverview from "../../components/PortfolioOverview";
 import PlatformStats from "../../components/PlatformStats";
 import ActivityFeed from "../components/ActivityFeed";
+import ActiveBetsCard from "../components/dashboard/ActiveBetsCard";
 import { useUserActivity } from "../hooks/useUserActivity";
+import { useActiveBets } from "../lib/hooks/useActiveBets";
 import { useStacks } from "../components/StacksProvider";
 
 export default function Dashboard() {
     const { userData } = useStacks();
     const stxAddress = userData?.profile?.stxAddress?.mainnet || userData?.profile?.stxAddress?.testnet || userData?.identityAddress;
-    const { activities, isLoading, error, refresh } = useUserActivity(stxAddress, 5);
+
+    const { activities, isLoading: activityLoading, error: activityError, refresh: refreshActivity } = useUserActivity(stxAddress, 5);
+    const { activeBets, isLoading: betsLoading, refresh: refreshBets } = useActiveBets(stxAddress);
 
     return (
         <main className="min-h-screen bg-background">
@@ -30,17 +34,19 @@ export default function Dashboard() {
                                 <div className="w-2 h-6 bg-primary rounded-full" />
                                 Active Bets
                             </h2>
-                            <div className="flex flex-col items-center justify-center py-12 text-center">
-                                <span className="text-muted-foreground font-medium">No active positions found in your portfolio.</span>
-                                <button className="mt-4 text-primary font-bold hover:underline">Explore Markets</button>
-                            </div>
+                            <ActiveBetsCard
+                                bets={activeBets}
+                                claimTransactions={new Map()}
+                                onClaim={() => { refreshBets(); }}
+                                isLoading={betsLoading}
+                            />
                         </div>
                         <div className="p-8 rounded-3xl border border-border bg-card/40 glass shadow-xl">
                             <ActivityFeed
                                 activities={activities}
-                                isLoading={isLoading}
-                                error={error}
-                                onRefresh={refresh}
+                                isLoading={activityLoading}
+                                error={activityError}
+                                onRefresh={refreshActivity}
                                 limit={5}
                             />
                         </div>
