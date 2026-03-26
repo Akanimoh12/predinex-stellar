@@ -164,6 +164,32 @@ export default function PoolDetails({ params }: { params: Promise<{ id: string }
                         </div>
                     </div>
 
+                    {/* User Bet Summary Card */}
+                    {userBet && (userBet.amountA > 0 || userBet.amountB > 0) && (
+                        <div className="mb-8 p-4 bg-primary/10 border border-primary/20 rounded-xl">
+                            <h3 className="text-lg font-semibold mb-3">Your Position</h3>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className={`p-3 rounded-lg ${userBet.amountA > 0 ? 'bg-green-500/10 border border-green-500/20' : 'bg-muted/50'}`}>
+                                    <p className="text-sm text-muted-foreground">{pool.outcomeA}</p>
+                                    <p className="text-xl font-bold">{(userBet.amountA / 1_000_000).toFixed(2)} STX</p>
+                                </div>
+                                <div className={`p-3 rounded-lg ${userBet.amountB > 0 ? 'bg-red-500/10 border border-red-500/20' : 'bg-muted/50'}`}>
+                                    <p className="text-sm text-muted-foreground">{pool.outcomeB}</p>
+                                    <p className="text-xl font-bold">{(userBet.amountB / 1_000_000).toFixed(2)} STX</p>
+                                </div>
+                            </div>
+                            <div className="mt-3 pt-3 border-t border-primary/20 flex justify-between items-center">
+                                <span className="text-sm text-muted-foreground">Total Staked</span>
+                                <span className="font-bold">{((userBet.amountA + userBet.amountB) / 1_000_000).toFixed(2)} STX</span>
+                            </div>
+                            {pool.settled && userHasWinnings && (
+                                <div className="mt-2 text-sm text-green-400">
+                                    Winner: {pool.winningOutcome === 0 ? pool.outcomeA : pool.outcomeB}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {/* Betting UI */}
                     {pool.settled ? (
                         <div className="mt-6">

@@ -29,13 +29,28 @@ export interface TransactionOptions {
  */
 export interface TransactionResult {
   txId: string;
-  transaction: any;
-  broadcastResult: any;
+  transaction: StacksTransactionWire;
+  broadcastResult: TxBroadcastResult;
 }
 
 /**
  * Estimated costs and sequence for a transaction
  */
+export interface TransactionStatusDetails {
+  tx_status: string;
+  tx_type: string;
+  block_hash: string;
+  block_height: number;
+  burn_chain_txid: string;
+  fee_rate: string;
+  sender_address: string;
+  contract_call?: {
+    contract_id: string;
+    function_name: string;
+    function_args: unknown[];
+  };
+}
+
 export interface TransactionEstimate {
   estimatedFee: number;
   estimatedNonce: number;
@@ -125,7 +140,7 @@ export class TransactionService {
     payload: TransactionPayload,
     senderKey: string,
     options: TransactionOptions = {}
-  ): Promise<any> {
+  ): Promise<StacksTransactionWire> {
     try {
       let fee = options.fee;
       let nonce = options.nonce;
@@ -248,7 +263,7 @@ export class TransactionService {
    */
   async getTransactionStatus(txId: string): Promise<{
     status: 'pending' | 'success' | 'failed' | 'not_found';
-    details?: any;
+    details?: TransactionStatusDetails;
   }> {
     try {
       // StacksNetwork exposes coreApiUrl/baseUrl at runtime but they are not part of

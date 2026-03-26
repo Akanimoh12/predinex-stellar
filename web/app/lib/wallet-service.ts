@@ -3,7 +3,7 @@
  * Enhanced wallet connection utilities for Stacks wallets
  */
 
-import { AppConfig, UserSession, showConnect, FinishedAuthData } from '@stacks/connect';
+import { AppConfig, UserSession, showConnect, FinishedAuthData, UserData } from '@stacks/connect';
 import { STACKS_MAINNET, STACKS_TESTNET, StacksNetwork } from '@stacks/network';
 import { ClarityValue } from '@stacks/transactions';
 
@@ -167,7 +167,7 @@ export class WalletService {
    * 
    * @returns The user data object if signed in, null otherwise
    */
-  getUserData(): any {
+  getUserData(): UserData | null {
     if (this.isSignedIn()) {
       return this.userSession.loadUserData();
     }
@@ -206,6 +206,9 @@ export class WalletService {
     }
 
     try {
+      if (!userData || !userData.appPrivateKey) {
+        throw new Error('User private key not available');
+      }
       const result = await txService.executeTransaction(payload, userData.appPrivateKey, {
         fee: payload.fee,
         nonce: payload.nonce,
@@ -263,11 +266,26 @@ export class WalletService {
 }
 
 // Global wallet provider type declarations
+interface HiroWalletProvider {
+  isRequestPending: boolean;
+  request: (payload: unknown) => Promise<unknown>;
+}
+
+interface XverseProviders {
+  webwallet: {
+    request: (payload: unknown) => Promise<unknown>;
+  };
+}
+
+interface LeatherProvider {
+  request: (payload: unknown) => Promise<unknown>;
+}
+
 declare global {
   interface Window {
-    HiroWalletProvider?: any;
-    XverseProviders?: any;
-    LeatherProvider?: any;
+    HiroWalletProvider?: HiroWalletProvider;
+    XverseProviders?: XverseProviders;
+    LeatherProvider?: LeatherProvider;
   }
 }// Type-safe wallet interaction layer
 // Type-safe wallet interaction layer

@@ -23,7 +23,7 @@ export default function Navbar() {
     };
 
     return (
-        <nav className="fixed top-0 w-full z-50 glass-panel !rounded-none !border-x-0 !border-t-0 border-b border-white/10 shadow-lg">
+        <nav aria-label="Main navigation" className="fixed top-0 w-full z-50 glass-panel !rounded-none !border-x-0 !border-t-0 border-b border-white/10 shadow-lg">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div className="flex justify-between items-center h-16">
                     {/* Logo */}
@@ -34,7 +34,7 @@ export default function Navbar() {
                         <span className="font-bold text-xl tracking-tight text-gradient">Predinex</span>
                     </Link>
                     {/* Navigation Links - Desktop */}
-                    <div className="hidden md:flex items-center gap-6" role="navigation" aria-label="Desktop navigation">
+                    <div className="hidden md:flex items-center gap-6" aria-label="Desktop navigation">
                         <Link href="/markets" className="text-sm font-medium text-muted-foreground hover:text-primary transition-colors" aria-label="View all markets">
                             Markets
                         </Link>
