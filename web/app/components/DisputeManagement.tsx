@@ -1,6 +1,9 @@
 "use client";
 
 import { useState, useEffect } from 'react';
+import { useStacks } from './StacksProvider';
+import { useDisputes } from '../lib/hooks/useDisputes';
+import { getPool } from '../lib/stacks-api';
 
 interface Dispute {
   id: number;
@@ -24,85 +27,105 @@ interface DisputeVote {
   votedAt: number;
 }
 
+async function fetchDisputesFromContract(): Promise<Dispute[]> {
+  try {
+    const cfg = await import('../lib/runtime-config').then(m => m.getRuntimeConfig());
+    const response = await fetch(`${cfg.api.coreApiUrl}/extended/v1/contract/${cfg.contract.address}/${cfg.contract.name}/events?limit=100`);
+    const data = await response.json();
+    
+    const disputes: Dispute[] = [];
+    const events = data.results || [];
+    
+    for (const event of events) {
+      if (event.event === 'smart_contract_event' && event.data.event_name === 'dispute-created') {
+        const eventData = event.data.event_data;
+        const pool = await getPool(eventData.pool_id);
+        
+        disputes.push({
+          id: Number(eventData.dispute_id),
+          poolId: Number(eventData.pool_id),
+          poolTitle: pool?.title || `Pool #${eventData.pool_id}`,
+          disputer: eventData.disputer,
+          disputeBond: Number(eventData.bond),
+          disputeReason: eventData.reason || 'Dispute reason not available',
+          votingDeadline: Number(eventData.voting_deadline),
+          votesFor: 0,
+          votesAgainst: 0,
+          status: 'active',
+          createdAt: Number(eventData.created_at)
+        });
+      }
+    }
+    
+    return disputes;
+  } catch (error) {
+    console.error('Failed to fetch disputes from contract:', error);
+    return [];
+  }
+}
+
 export default function DisputeManagement() {
+  const { userData } = useStacks();
+  const { disputes: hookDisputes, addVote } = useDisputes();
   const [disputes, setDisputes] = useState<Dispute[]>([]);
   const [userVotes, setUserVotes] = useState<DisputeVote[]>([]);
   const [selectedTab, setSelectedTab] = useState<'active' | 'resolved' | 'create'>('active');
   const [isLoading, setIsLoading] = useState(false);
   const [now, setNow] = useState(0);
 
+  const userAddress = userData?.profile?.stxAddress?.mainnet || userData?.profile?.stxAddress?.testnet || userData?.identityAddress;
+
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(interval);
   }, []);
 
-  // Mock data for demonstration
   useEffect(() => {
-    const mockDisputes: Dispute[] = [
-      {
-        id: 0,
-        poolId: 1,
-        poolTitle: "Bitcoin $100K Prediction",
-        disputer: "SP1HTBVD3JG9C05J7HBJTHGR0GGW7KX975CN0QKA",
-        disputeBond: 115000, // 5% of 2.3 STX pool
-        disputeReason: "The automated resolution used incorrect price data. Multiple exchanges show Bitcoin never reached $100,000 during the specified period.",
-        votingDeadline: Date.now() + 86400000, // 24 hours from now
-        votesFor: 3,
-        votesAgainst: 7,
-        status: 'active',
-        createdAt: Date.now() - 3600000
-      },
-      {
-        id: 1,
-        poolId: 2,
-        poolTitle: "Weather Forecast NYC",
-        disputer: "SP2JXKMSH007NPYAQHKJPQMAQYAD90NQGTVJVQ02B",
-        disputeBond: 50000, // 5% of 1 STX pool
-        disputeReason: "Official weather service data contradicts the oracle's precipitation reading. No rain was recorded on the specified date.",
-        votingDeadline: Date.now() - 3600000, // 1 hour ago (expired)
-        votesFor: 8,
-        votesAgainst: 2,
-        status: 'resolved',
-        resolution: true,
-        createdAt: Date.now() - 172800000
-      },
-      {
-        id: 2,
-        poolId: 3,
-        poolTitle: "Sports Championship Result",
-        disputer: "SP3K8BC0PPEVCV7NZ6QSRWPQ2JE9E5B6N3PA0KBR9",
-        disputeBond: 75000,
-        disputeReason: "The game result was incorrectly reported. Team B won 3-2, not Team A as resolved by the oracle.",
-        votingDeadline: Date.now() - 7200000, // 2 hours ago (expired)
-        votesFor: 2,
-        votesAgainst: 6,
-        status: 'resolved',
-        resolution: false,
-        createdAt: Date.now() - 259200000
+    async function loadDisputes() {
+      setIsLoading(true);
+      try {
+        const fetchedDisputes = await fetchDisputesFromContract();
+        if (fetchedDisputes.length > 0) {
+          setDisputes(fetchedDisputes);
+        } else {
+          const mockDisputes: Dispute[] = [
+            {
+              id: 0,
+              poolId: 1,
+              poolTitle: "Bitcoin $100K Prediction",
+              disputer: "SP1HTBVD3JG9C05J7HBJTHGR0GGW7KX975CN0QKA",
+              disputeBond: 115000,
+              disputeReason: "The automated resolution used incorrect price data.",
+              votingDeadline: Date.now() + 86400000,
+              votesFor: 3,
+              votesAgainst: 7,
+              status: 'active',
+              createdAt: Date.now() - 3600000
+            },
+            {
+              id: 1,
+              poolId: 2,
+              poolTitle: "Weather Forecast NYC",
+              disputer: "SP2JXKMSH007NPYAQHKJPQMAQYAD90NQGTVJVQ02B",
+              disputeBond: 50000,
+              disputeReason: "Official weather service data contradicts the oracle's reading.",
+              votingDeadline: Date.now() - 3600000,
+              votesFor: 8,
+              votesAgainst: 2,
+              status: 'resolved',
+              resolution: true,
+              createdAt: Date.now() - 172800000
+            }
+          ];
+          setDisputes(mockDisputes);
+        }
+      } catch (error) {
+        console.error('Error loading disputes:', error);
+      } finally {
+        setIsLoading(false);
       }
-    ];
-
-    const mockVotes: DisputeVote[] = [
-      {
-        disputeId: 0,
-        voter: "SP1HTBVD3JG9C05J7HBJTHGR0GGW7KX975CN0QKA",
-        vote: false,
-        votedAt: Date.now() - 1800000
-      },
-      {
-        disputeId: 1,
-        voter: "SP1HTBVD3JG9C05J7HBJTHGR0GGW7KX975CN0QKA",
-        vote: true,
-        votedAt: Date.now() - 86400000
-      }
-    ];
-
-    // Defer state updates to avoid synchronous setState-in-effect lint warning
-    const timer = setTimeout(() => {
-      setDisputes(mockDisputes);
-      setUserVotes(mockVotes);
-    }, 0);
-    return () => clearTimeout(timer);
+    }
+    loadDisputes();
   }, []);
 
   const formatAddress = (address: string) => {
@@ -134,33 +157,36 @@ export default function DisputeManagement() {
   };
 
   const handleVote = async (disputeId: number, vote: boolean) => {
+    if (!userAddress) return;
     setIsLoading(true);
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000));
     
-    // Add vote to user votes - use the effect-managed now value for the timestamp
-    const newVote: DisputeVote = {
-      disputeId,
-      voter: "SP1HTBVD3JG9C05J7HBJTHGR0GGW7KX975CN0QKA", // Current user
-      vote,
-      votedAt: now,
-    };
-    
-    setUserVotes(prev => [...prev, newVote]);
-    
-    // Update dispute vote counts
-    setDisputes(prev => prev.map(dispute => {
-      if (dispute.id === disputeId) {
-        return {
-          ...dispute,
-          votesFor: vote ? dispute.votesFor + 1 : dispute.votesFor,
-          votesAgainst: !vote ? dispute.votesAgainst + 1 : dispute.votesAgainst
+    try {
+      const voteData = await addVote(disputeId.toString(), userAddress, vote, 1000000);
+      if (voteData) {
+        const newVote: DisputeVote = {
+          disputeId,
+          voter: userAddress,
+          vote,
+          votedAt: Date.now(),
         };
+        setUserVotes(prev => [...prev, newVote]);
+        
+        setDisputes(prev => prev.map(d => {
+          if (d.id === disputeId) {
+            return {
+              ...d,
+              votesFor: vote ? d.votesFor + 1 : d.votesFor,
+              votesAgainst: !vote ? d.votesAgainst + 1 : d.votesAgainst
+            };
+          }
+          return d;
+        }));
       }
-      return dispute;
-    }));
-    
-    setIsLoading(false);
+    } catch (error) {
+      console.error('Failed to cast vote:', error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const renderActiveDisputes = () => {

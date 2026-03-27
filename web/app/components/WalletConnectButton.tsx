@@ -42,12 +42,16 @@ export function WalletConnectButton() {
           ? Date.now() - connectStartRef.current
           : undefined;
       connectStartRef.current = null;
-      setIsConnecting(false);
-      emitWalletEvent({
-        event: 'wallet.connect.success',
-        timestamp: new Date().toISOString(),
-        durationMs,
-      });
+      
+      const timer = setTimeout(() => {
+        setIsConnecting(false);
+        emitWalletEvent({
+          event: 'wallet.connect.success',
+          timestamp: new Date().toISOString(),
+          durationMs,
+        });
+      }, 0);
+      return () => clearTimeout(timer);
     }
 
     if (status === 'disconnected' && isConnecting) {
@@ -57,12 +61,16 @@ export function WalletConnectButton() {
           ? Date.now() - connectStartRef.current
           : undefined;
       connectStartRef.current = null;
-      setIsConnecting(false);
-      emitWalletEvent({
-        event: 'wallet.connect.cancel',
-        timestamp: new Date().toISOString(),
-        durationMs,
-      });
+      
+      const timer = setTimeout(() => {
+        setIsConnecting(false);
+        emitWalletEvent({
+          event: 'wallet.connect.cancel',
+          timestamp: new Date().toISOString(),
+          durationMs,
+        });
+      }, 0);
+      return () => clearTimeout(timer);
     }
   }, [status, isConnecting]);
 

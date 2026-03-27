@@ -1,7 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useIncentives } from '../lib/hooks/useIncentives';
+import { useStacks } from './StacksProvider';
+import { getRuntimeConfig } from '../lib/runtime-config';
+import { getPool, getUserBet } from '../lib/stacks-api';
+import { calculateTotalIncentive, DEFAULT_INCENTIVE_CONFIG, BetterIncentive } from '../lib/liquidity-incentives';
 import { Gift, TrendingUp, Award, Zap } from 'lucide-react';
 
 interface IncentivesDisplayProps {
@@ -9,9 +13,144 @@ interface IncentivesDisplayProps {
   poolId?: number;
 }
 
+interface ContractIncentive {
+  poolId: number;
+  betterId: string;
+  betAmount: number;
+  bonusAmount: number;
+  bonusType: 'early-bird' | 'volume' | 'referral' | 'loyalty';
+  claimedAt?: number;
+  status: 'pending' | 'claimed';
+}
+
+async function fetchIncentivesFromContract(userAddress: string): Promise<ContractIncentive[]> {
+  try {
+    const cfg = getRuntimeConfig();
+    const response = await fetch(`${cfg.api.coreApiUrl}/extended/v1/address/${userAddress}/transactions?limit=50&type=contract_call`);
+    const data = await response.json();
+    
+    const incentives: ContractIncentive[] = [];
+    const results = data.results || [];
+    
+    for (const tx of results) {
+      if (tx.contract_call?.function_name === 'claim-incentive') {
+        const args = tx.contract_call.function_args || [];
+        const poolId = args.find((a: any) => a.name === 'pool-id')?.repr?.replace('u', '') || '0';
+        
+        incentives.push({
+          poolId: parseInt(poolId),
+          betterId: userAddress,
+          betAmount: 0,
+          bonusAmount: 0,
+          bonusType: 'loyalty',
+          claimedAt: tx.burn_block_time * 1000,
+          status: 'claimed'
+        });
+      }
+    }
+    
+    return incentives;
+  } catch (error) {
+    console.error('Failed to fetch incentives from contract:', error);
+    return [];
+  }
+}
+
+async function calculateRealIncentives(userAddress: string, poolId: number): Promise<ContractIncentive[]> {
+  try {
+    const pool = await getPool(poolId);
+    if (!pool) return [];
+    
+    const userBet = await getUserBet(poolId, userAddress);
+    if (!userBet || userBet.totalBet === 0) return [];
+    
+    const totalVolume = pool.totalA + pool.totalB;
+    const previousBetsCount = 0;
+    
+    const { total, breakdown } = calculateTotalIncentive(
+      userBet.totalBet / 1_000_000,
+      1,
+      totalVolume / 1_000_000,
+      previousBetsCount,
+      DEFAULT_INCENTIVE_CONFIG
+    );
+    
+    const bonusType: 'early-bird' | 'volume' | 'referral' | 'loyalty' = 
+      breakdown.earlyBird > 0 ? 'early-bird' :
+      breakdown.volume > 0 ? 'volume' :
+      'loyalty';
+    
+    return [{
+      poolId,
+      betterId: userAddress,
+      betAmount: userBet.totalBet,
+      bonusAmount: total * 1_000_000,
+      bonusType,
+      status: 'pending'
+    }];
+  } catch (error) {
+    console.error('Failed to calculate incentives:', error);
+    return [];
+  }
+}
+
 export default function IncentivesDisplay({ betterId, poolId }: IncentivesDisplayProps) {
-  const { incentives, getPendingIncentives, getTotalPendingBonus, getClaimedIncentives, getTotalClaimedBonus } = useIncentives();
+  const { incentives, getPendingIncentives, getTotalPendingBonus, getClaimedIncentives, getTotalClaimedBonus, setIncentives, claimIncentive } = useIncentives();
   const [selectedTab, setSelectedTab] = useState<'pending' | 'claimed'>('pending');
+  const [isLoading, setIsLoading] = useState(false);
+  const { userData } = useStacks();
+  
+  const userAddress = userData?.profile?.stxAddress?.mainnet || userData?.profile?.stxAddress?.testnet || userData?.identityAddress;
+  
+  useEffect(() => {
+    if (!userAddress) return;
+    
+    async function loadIncentives() {
+      setIsLoading(true);
+      try {
+        const contractIncentives = await fetchIncentivesFromContract(userAddress);
+        
+        const poolIds: number[] = [];
+        const cfg = getRuntimeConfig();
+        for (let i = 0; i < 10; i++) {
+          poolIds.push(i);
+        }
+        
+        const pendingIncentives = await calculateRealIncentives(userAddress, poolId || 0);
+        
+        const allIncentives: BetterIncentive[] = [
+          ...contractIncentives.map(inc => ({
+            ...inc,
+            bonusType: inc.bonusType,
+            status: inc.status as 'pending' | 'claimed'
+          })),
+          ...pendingIncentives.map(inc => ({
+            ...inc,
+            bonusType: inc.bonusType,
+            status: inc.status as 'pending' | 'claimed'
+          }))
+        ];
+        
+        if (allIncentives.length > 0) {
+          setIncentives(allIncentives);
+        }
+      } catch (error) {
+        console.error('Error loading incentives:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    
+    loadIncentives();
+  }, [userAddress, poolId]);
+
+  const handleClaim = useCallback(async (incentiveId: number) => {
+    try {
+      await claimIncentive(incentiveId);
+    } catch (error) {
+      console.error('Failed to claim incentive:', error);
+    }
+  }, [claimIncentive]);
 
   if (!betterId) {
     return (
@@ -120,7 +259,10 @@ export default function IncentivesDisplay({ betterId, poolId }: IncentivesDispla
                   </div>
                   <div className="text-right">
                     <p className="font-bold">{incentive.bonusAmount.toFixed(2)} STX</p>
-                    <button className="text-xs px-2 py-1 bg-primary/20 hover:bg-primary/30 rounded mt-1 transition-all">
+                    <button 
+                      onClick={() => handleClaim(idx)}
+                      className="text-xs px-2 py-1 bg-primary/20 hover:bg-primary/30 rounded mt-1 transition-all"
+                    >
                       Claim
                     </button>
                   </div>

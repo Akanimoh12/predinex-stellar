@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook } from '@testing-library/react';
-import * as StacksProviderModule from '@/components/StacksProvider';
+import { render, screen, cleanup } from '@testing-library/react';
+import React from 'react';
+import * as StacksProvider from '@/components/StacksProvider';
 
-// Mock before importing components that depend on these modules
 vi.mock('@/components/StacksProvider', () => ({
   useStacks: vi.fn(),
   StacksProvider: ({ children }: { children: React.ReactNode }) => <div data-testid="stacks-provider">{children}</div>,
@@ -45,41 +45,43 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
-// Import components after mocks are set up
 import AuthGuard from '@/components/AuthGuard';
 
-describe('Wallet Connection State', () => {
+describe('Navbar and Auth Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it('shows authentication required when not connected', () => {
-    vi.mocked(StacksProviderModule.useStacks).mockReturnValue({
+    vi.mocked(StacksProvider.useStacks).mockReturnValue({
       userData: null,
       authenticate: vi.fn(),
       signOut: vi.fn(),
     });
 
-    const { getByText } = renderHook(() => (
+    render(
       <AuthGuard>
         <div>Protected Content</div>
       </AuthGuard>
-    )).result;
+    );
 
-    // The test should show "Authentication Required" when userData is null
-    // This verifies the mock is working correctly
-    expect(true).toBe(true);
+    expect(screen.getByText(/authentication required/i)).toBeInTheDocument();
   });
 
   it('shows protected content when connected via Stacks', () => {
-    vi.mocked(StacksProviderModule.useStacks).mockReturnValue({
+    vi.mocked(StacksProvider.useStacks).mockReturnValue({
       userData: { profile: { stxAddress: { mainnet: 'ST123' } } },
       authenticate: vi.fn(),
       signOut: vi.fn(),
     });
 
-    // Verify that useStacks returns the mock data correctly
-    const mockReturn = StacksProviderModule.useStacks();
-    expect(mockReturn.userData).toEqual({ profile: { stxAddress: { mainnet: 'ST123' } } });
+    render(
+      <AuthGuard>
+        <div>Protected Content</div>
+      </AuthGuard>
+    );
+
+    expect(screen.getByText('Protected Content')).toBeInTheDocument();
+    expect(screen.queryByText(/authentication required/i)).not.toBeInTheDocument();
   });
 });
