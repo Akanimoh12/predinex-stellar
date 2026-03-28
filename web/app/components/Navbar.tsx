@@ -7,6 +7,7 @@ import AppKitButton from "../../components/AppKitButton";
 import { useStacks } from "./StacksProvider";
 import { truncateAddress } from "../lib/utils";
 import { ICON_CLASS } from "../lib/constants";
+import { NetworkMismatchWarning } from "./NetworkMismatchWarning";
 
 export default function Navbar() {
     const { userData, signOut } = useStacks();
@@ -23,7 +24,9 @@ export default function Navbar() {
     };
 
     return (
-        <nav className="fixed top-0 w-full z-50 glass-panel !rounded-none !border-x-0 !border-t-0 border-b border-white/10 shadow-lg">
+        <div className="fixed top-0 w-full z-50 flex flex-col">
+            <NetworkMismatchWarning />
+            <nav className="w-full glass-panel !rounded-none !border-x-0 !border-t-0 border-b border-white/10 shadow-lg">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div className="flex justify-between items-center h-16">
                     {/* Logo */}
@@ -155,6 +158,7 @@ export default function Navbar() {
                 </div>
             )}
         </nav>
+    </div>
     );
 }
 // Generic navigation bar for all pages

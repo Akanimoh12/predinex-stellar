@@ -9,6 +9,7 @@ import { uintCV } from '@stacks/transactions';
 import { getRuntimeConfig } from '../lib/runtime-config';
 import { Loader2, Wallet, AlertCircle } from 'lucide-react';
 import { Pool } from '@/app/lib/stacks-api';
+import { useNetworkMismatch } from '@/lib/hooks/useNetworkMismatch';
 
 interface BettingSectionProps {
     pool: Pool;
@@ -18,6 +19,7 @@ interface BettingSectionProps {
 export default function BettingSection({ pool, poolId }: BettingSectionProps) {
     const { userData, authenticate } = useStacks();
     const { isConnected, address } = useWalletConnection();
+    const { isMismatch, expectedNetworkName, switchNetwork } = useNetworkMismatch();
     const { showToast } = useToast();
     const { contract } = getRuntimeConfig();
     const [betAmount, setBetAmount] = useState("");
@@ -142,6 +144,22 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
                 </div>
             )}
 
+            {/* Network Mismatch Warning */}
+            {isConnected && isMismatch && (
+                <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg flex flex-col gap-2">
+                    <div className="flex gap-2 text-red-500">
+                        <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                        <p className="text-sm font-medium">Wrong Network: Please switch to {expectedNetworkName} to place bets.</p>
+                    </div>
+                    <button 
+                        onClick={() => switchNetwork()}
+                        className="text-xs font-bold text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded-lg transition-colors self-start"
+                    >
+                        Switch to {expectedNetworkName}
+                    </button>
+                </div>
+            )}
+
             {/* Bet Amount Input */}
             <div>
                 <label className="block text-sm font-medium mb-2">Bet Amount (STX)</label>
@@ -153,7 +171,7 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
                     placeholder="e.g., 10"
                     value={betAmount}
                     onChange={(e) => setBetAmount(e.target.value)}
-                    disabled={isBetting || (walletBalance !== null && walletBalance < 0.1)}
+                    disabled={isBetting || (walletBalance !== null && walletBalance < 0.1) || isMismatch}
                     aria-label="Enter bet amount in STX"
                 />
             </div>
@@ -162,14 +180,14 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
             <div className="grid grid-cols-2 gap-4">
                 <button
                     onClick={() => placeBet(0)}
-                    disabled={isBetting || (walletBalance !== null && walletBalance < 0.1)}
+                    disabled={isBetting || (walletBalance !== null && walletBalance < 0.1) || isMismatch}
                     className="py-4 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl transition-all disabled:opacity-50 flex justify-center items-center gap-2"
                 >
                     {isBetting ? <Loader2 className="w-5 h-5 animate-spin" /> : `Bet on ${pool.outcomeA}`}
                 </button>
                 <button
                     onClick={() => placeBet(1)}
-                    disabled={isBetting || (walletBalance !== null && walletBalance < 0.1)}
+                    disabled={isBetting || (walletBalance !== null && walletBalance < 0.1) || isMismatch}
                     className="py-4 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl transition-all disabled:opacity-50 flex justify-center items-center gap-2"
                 >
                     {isBetting ? <Loader2 className="w-5 h-5 animate-spin" /> : `Bet on ${pool.outcomeB}`}
