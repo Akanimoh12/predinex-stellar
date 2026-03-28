@@ -84,13 +84,20 @@ stateDiagram-v2
    cd predinex-stellar
    ```
 
-2. **Build the Contract**
+2. **Quick Start (Recommended)**
+
+   Run the bootstrap script to install all dependencies and verify your environment:
+   ```bash
+   ./scripts/bootstrap.sh
+   ```
+
+3. **Build the Contract**
    ```bash
    cd contracts/predinex
    stellar contract build
    ```
 
-3. **Run Tests**
+4. **Run Tests**
    ```bash
    cargo test
    ```

@@ -177,6 +177,10 @@ impl PredinexContract {
             panic!("Already settled");
         }
 
+        if env.ledger().timestamp() < pool.expiry {
+            panic!("Pool has not expired yet");
+        }
+
         if winning_outcome > 1 {
             panic!("Invalid outcome");
         }
