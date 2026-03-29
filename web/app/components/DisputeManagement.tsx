@@ -1,6 +1,5 @@
-"use client";
+'use client';
 
-import { useState, useEffect } from 'react';
 import { useWallet } from './WalletAdapterProvider';
 import { formatDisplayAddress } from '../lib/address-display';
 import { useDisputes } from '../lib/hooks/useDisputes';
@@ -447,39 +446,22 @@ export default function DisputeManagement() {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Dispute Management</h1>
-        <p className="text-muted-foreground">
-          Community-driven dispute resolution for automated market settlements
-        </p>
-      </div>
+      <DisputePageHeader />
+      <DisputeTabNav selected={selectedTab} onSelect={setSelectedTab} />
 
-      {/* Tab Navigation */}
-      <div className="flex space-x-1 mb-6 bg-muted p-1 rounded-lg">
-        {[
-          { key: 'active' as const, label: 'Active Disputes' },
-          { key: 'resolved' as const, label: 'Resolved' },
-          { key: 'create' as const, label: 'Create Dispute' }
-        ].map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => setSelectedTab(tab.key)}
-            className={`flex-1 px-4 py-2 rounded-md transition-colors ${
-              selectedTab === tab.key
-                ? 'bg-background text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab Content */}
       <div>
-        {selectedTab === 'active' && renderActiveDisputes()}
-        {selectedTab === 'resolved' && renderResolvedDisputes()}
-        {selectedTab === 'create' && renderCreateDispute()}
+        {selectedTab === 'active' && (
+          <ActiveDisputesSection
+            disputes={disputes}
+            now={now}
+            isLoading={isLoading}
+            hasUserVoted={hasUserVoted}
+            getUserVote={getUserVote}
+            onVote={handleVote}
+          />
+        )}
+        {selectedTab === 'resolved' && <ResolvedDisputesSection disputes={disputes} />}
+        {selectedTab === 'create' && <CreateDisputeSection isLoading={isLoading} />}
       </div>
     </div>
   );
