@@ -12,7 +12,7 @@ pub enum DataKey {
     Token,
     Treasury,
     TreasuryRecipient,
-    PoolParticipants(u32),
+    DelegatedSettler(u32),
 }
 
 #[derive(Clone)]
@@ -31,6 +31,8 @@ pub struct Pool {
     pub created_at: u64,
     pub settled_at: Option<u64>,
     pub expiry: u64,
+    /// Current operational status of the pool. Defaults to `Active`.
+    pub status: PoolStatus,
 }
 
 #[derive(Clone)]
@@ -51,8 +53,44 @@ impl PredinexContract {
             panic!("Already initialized");
         }
         env.storage().persistent().set(&DataKey::Token, &token);
-        env.storage().persistent().set(&DataKey::TreasuryRecipient, &treasury_recipient);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryRecipient, &treasury_recipient);
         env.storage().persistent().set(&DataKey::Treasury, &0i128);
+    }
+
+    /// Normalize a Soroban `String` to a comparable form by converting to
+    /// lowercase bytes and stripping leading/trailing ASCII spaces.
+    /// Uses a fixed 64-byte stack buffer — outcome labels longer than 64 bytes
+    /// are compared on their first 64 bytes only, which is sufficient for
+    /// practical market labels.
+    fn normalize_outcome(env: &Env, s: &String) -> soroban_sdk::Bytes {
+        let len = s.len() as usize;
+        // Copy raw bytes into a fixed-size stack buffer (max 64 bytes)
+        let copy_len = if len < 64 { len } else { 64 };
+        let mut buf = [0u8; 64];
+        s.copy_into_slice(&mut buf[..copy_len]);
+
+        // Find trim boundaries
+        let mut start = 0usize;
+        let mut end = copy_len;
+        while start < end && buf[start] == b' ' {
+            start += 1;
+        }
+        while end > start && buf[end - 1] == b' ' {
+            end -= 1;
+        }
+
+        // Build a Soroban Bytes with lowercased content
+        let mut result = soroban_sdk::Bytes::new(env);
+        let mut i = start;
+        while i < end {
+            let b = buf[i];
+            let lower = if b >= b'A' && b <= b'Z' { b + 32 } else { b };
+            result.push_back(lower);
+            i += 1;
+        }
+        result
     }
 
     pub fn create_pool(
@@ -65,6 +103,11 @@ impl PredinexContract {
         duration: u64,
     ) -> u32 {
         creator.require_auth();
+
+        // Reject duplicate outcome labels (case-insensitive, whitespace-trimmed)
+        if Self::normalize_outcome(&env, &outcome_a) == Self::normalize_outcome(&env, &outcome_b) {
+            panic!("Duplicate outcome labels");
+        }
 
         let pool_id = Self::get_pool_counter(&env);
 
@@ -85,6 +128,7 @@ impl PredinexContract {
             created_at,
             settled_at: None,
             expiry,
+            status: PoolStatus::Active,
         };
 
         env.storage()
@@ -116,6 +160,10 @@ impl PredinexContract {
 
         if pool.settled {
             panic!("Pool already settled");
+        }
+
+        if pool.status != PoolStatus::Active {
+            panic!("Pool is not active");
         }
 
         if env.ledger().timestamp() >= pool.expiry {
@@ -177,6 +225,37 @@ impl PredinexContract {
         );
     }
 
+    /// Assign a delegated settler for a pool. Only the pool creator can call this.
+    pub fn assign_settler(env: Env, creator: Address, pool_id: u32, settler: Address) {
+        creator.require_auth();
+
+        let pool = env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+            .expect("Pool not found");
+
+        if creator != pool.creator {
+            panic!("Unauthorized");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DelegatedSettler(pool_id), &settler);
+
+        env.events().publish(
+            (Symbol::new(&env, "assign_settler"), pool_id),
+            (creator, settler),
+        );
+    }
+
+    /// Get the delegated settler for a pool, if one has been assigned.
+    pub fn get_delegated_settler(env: Env, pool_id: u32) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DelegatedSettler(pool_id))
+    }
+
     pub fn settle_pool(env: Env, caller: Address, pool_id: u32, winning_outcome: u32) {
         caller.require_auth();
 
@@ -186,7 +265,16 @@ impl PredinexContract {
             .get::<_, Pool>(&DataKey::Pool(pool_id))
             .expect("Pool not found");
 
-        if caller != pool.creator {
+        // Allow creator or delegated settler
+        let delegated_settler: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatedSettler(pool_id));
+
+        let is_authorized =
+            caller == pool.creator || delegated_settler.map(|s| s == caller).unwrap_or(false);
+
+        if !is_authorized {
             panic!("Unauthorized");
         }
 
@@ -210,8 +298,10 @@ impl PredinexContract {
             .persistent()
             .set(&DataKey::Pool(pool_id), &pool);
 
-        env.events()
-            .publish((Symbol::new(&env, "settle_pool"), pool_id), winning_outcome);
+        env.events().publish(
+            (Symbol::new(&env, "settle_pool"), pool_id),
+            (caller, winning_outcome),
+        );
     }
 
     pub fn claim_winnings(env: Env, user: Address, pool_id: u32) -> i128 {
@@ -225,6 +315,10 @@ impl PredinexContract {
 
         if !pool.settled {
             panic!("Pool not settled");
+        }
+
+        if pool.status != PoolStatus::Active {
+            panic!("Pool is frozen or disputed; claims are blocked");
         }
 
         let user_bet = env
@@ -266,10 +360,8 @@ impl PredinexContract {
             .persistent()
             .set(&DataKey::Treasury, &(current_treasury + fee));
 
-        env.events().publish(
-            (Symbol::new(&env, "fee_collected"), pool_id),
-            fee,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "fee_collected"), pool_id), fee);
 
         let token_address = env
             .storage()
@@ -333,7 +425,11 @@ impl PredinexContract {
             .expect("Not initialized");
         let token_client = token::Client::new(&env, &token_address);
 
-        token_client.transfer(&env.current_contract_address(), &treasury_recipient, &amount);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &treasury_recipient,
+            &amount,
+        );
 
         env.storage()
             .persistent()
@@ -343,6 +439,121 @@ impl PredinexContract {
             (Symbol::new(&env, "treasury_withdrawal"), treasury_recipient),
             amount,
         );
+    }
+
+    /// Set (or replace) the freeze admin address. Only callable by the treasury recipient.
+    /// The freeze admin is the sole authority that can freeze, dispute, or unfreeze pools.
+    pub fn set_freeze_admin(env: Env, caller: Address, freeze_admin: Address) {
+        caller.require_auth();
+
+        let treasury_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryRecipient)
+            .expect("Not initialized");
+
+        if caller != treasury_recipient {
+            panic!("Unauthorized");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FreezeAdmin, &freeze_admin);
+
+        env.events().publish(
+            (Symbol::new(&env, "freeze_admin_set"),),
+            freeze_admin,
+        );
+    }
+
+    /// Freeze a pool, blocking new bets and claim payouts.
+    /// Callable only by the freeze admin.
+    ///
+    /// Operational flow: call this as soon as an incorrect settlement is suspected.
+    /// The pool stays frozen until `unfreeze_pool` is called (after review clears it)
+    /// or `dispute_pool` escalates it to the Disputed state.
+    pub fn freeze_pool(env: Env, caller: Address, pool_id: u32) {
+        caller.require_auth();
+        Self::require_freeze_admin(&env, &caller);
+
+        let mut pool = env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+            .expect("Pool not found");
+
+        if pool.status == PoolStatus::Frozen {
+            panic!("Pool already frozen");
+        }
+
+        pool.status = PoolStatus::Frozen;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Pool(pool_id), &pool);
+
+        env.events()
+            .publish((Symbol::new(&env, "pool_frozen"), pool_id), caller);
+    }
+
+    /// Mark a settled pool as disputed, blocking claim payouts pending review.
+    /// Callable only by the freeze admin.
+    ///
+    /// Operational flow: use this when a settlement result is actively contested.
+    /// Resolve by calling `unfreeze_pool` (to restore the existing settlement) or
+    /// `settle_pool` again after correcting the outcome, then `unfreeze_pool`.
+    pub fn dispute_pool(env: Env, caller: Address, pool_id: u32) {
+        caller.require_auth();
+        Self::require_freeze_admin(&env, &caller);
+
+        let mut pool = env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+            .expect("Pool not found");
+
+        if !pool.settled {
+            panic!("Pool must be settled before it can be disputed");
+        }
+
+        if pool.status == PoolStatus::Disputed {
+            panic!("Pool already disputed");
+        }
+
+        pool.status = PoolStatus::Disputed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Pool(pool_id), &pool);
+
+        env.events()
+            .publish((Symbol::new(&env, "pool_disputed"), pool_id), caller);
+    }
+
+    /// Unfreeze a frozen or disputed pool, restoring it to Active status.
+    /// Callable only by the freeze admin.
+    ///
+    /// Operational flow: call this once the review is complete and the pool state
+    /// is confirmed correct. Claims and (for non-settled pools) bets resume normally.
+    pub fn unfreeze_pool(env: Env, caller: Address, pool_id: u32) {
+        caller.require_auth();
+        Self::require_freeze_admin(&env, &caller);
+
+        let mut pool = env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+            .expect("Pool not found");
+
+        if pool.status == PoolStatus::Active {
+            panic!("Pool is not frozen or disputed");
+        }
+
+        pool.status = PoolStatus::Active;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Pool(pool_id), &pool);
+
+        env.events()
+            .publish((Symbol::new(&env, "pool_unfrozen"), pool_id), caller);
     }
 
     pub fn get_pool(env: Env, pool_id: u32) -> Option<Pool> {
@@ -384,6 +595,17 @@ impl PredinexContract {
             .persistent()
             .get(&DataKey::PoolCounter)
             .unwrap_or(1)
+    }
+
+    fn require_freeze_admin(env: &Env, caller: &Address) {
+        let freeze_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FreezeAdmin)
+            .expect("Freeze admin not set");
+        if caller != &freeze_admin {
+            panic!("Unauthorized: caller is not the freeze admin");
+        }
     }
 
     pub fn get_user_bet(env: Env, pool_id: u32, user: Address) -> Option<UserBet> {
