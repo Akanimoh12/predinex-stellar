@@ -15,6 +15,23 @@ pub enum DataKey {
     DelegatedSettler(u32),
 }
 
+/// Explicit lifecycle status for a prediction pool.
+///
+/// Transitions:
+///   Open  ──(expiry reached + settle_pool called)──►  Settled(winning_outcome)
+///
+/// Future terminal states (Cancelled, Voided, Paused) can be added here
+/// without ambiguity, because status is the single source of truth.
+#[derive(Clone, PartialEq)]
+#[contracttype]
+pub enum PoolStatus {
+    /// Accepting bets; expiry has not yet passed.
+    Open,
+    /// Betting closed and a winning outcome has been declared.
+    /// The inner value is the winning outcome index (0 or 1).
+    Settled(u32),
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub struct Pool {
@@ -29,7 +46,6 @@ pub struct Pool {
     pub settled: bool,
     pub winning_outcome: Option<u32>,
     pub created_at: u64,
-    pub settled_at: Option<u64>,
     pub expiry: u64,
     /// Current operational status of the pool. Defaults to `Active`.
     pub status: PoolStatus,
@@ -149,7 +165,6 @@ impl PredinexContract {
             settled: false,
             winning_outcome: None,
             created_at,
-            settled_at: None,
             expiry,
             status: PoolStatus::Active,
         };
@@ -162,7 +177,7 @@ impl PredinexContract {
             .set(&DataKey::PoolCounter, &(pool_id + 1));
 
         env.events()
-            .publish((Symbol::new(&env, "create_pool"), pool_id), creator);
+            .publish((Symbol::new(&env, "create_pool"), pool_id), (creator, Symbol::new(&env, "Open")));
 
         pool_id
     }
@@ -170,7 +185,6 @@ impl PredinexContract {
     pub fn place_bet(env: Env, user: Address, pool_id: u32, outcome: u32, amount: i128) {
         user.require_auth();
 
-        // Validate positive bet amount
         if amount <= 0 {
             panic!("Invalid bet amount");
         }
@@ -181,7 +195,7 @@ impl PredinexContract {
             .get::<_, Pool>(&DataKey::Pool(pool_id))
             .expect("Pool not found");
 
-        if pool.settled {
+        if pool.status != PoolStatus::Open {
             panic!("Pool already settled");
         }
 
@@ -309,7 +323,7 @@ impl PredinexContract {
             panic!("Unauthorized");
         }
 
-        if pool.settled {
+        if pool.status != PoolStatus::Open {
             panic!("Already settled");
         }
 
@@ -321,9 +335,7 @@ impl PredinexContract {
             panic!("Invalid outcome");
         }
 
-        pool.settled = true;
-        pool.winning_outcome = Some(winning_outcome);
-        pool.settled_at = Some(env.ledger().timestamp());
+        pool.status = PoolStatus::Settled(winning_outcome);
 
         env.storage()
             .persistent()
@@ -344,9 +356,10 @@ impl PredinexContract {
             .get::<_, Pool>(&DataKey::Pool(pool_id))
             .expect("Pool not found");
 
-        if !pool.settled {
-            panic!("Pool not settled");
-        }
+        let winning_outcome = match pool.status {
+            PoolStatus::Settled(outcome) => outcome,
+            _ => panic!("Pool not settled"),
+        };
 
         if pool.status != PoolStatus::Active {
             panic!("Pool is frozen or disputed; claims are blocked");
@@ -357,8 +370,6 @@ impl PredinexContract {
             .persistent()
             .get::<_, UserBet>(&DataKey::UserBet(pool_id, user.clone()))
             .expect("No bet found");
-
-        let winning_outcome = pool.winning_outcome.expect("No winning outcome");
 
         let user_winning_bet = if winning_outcome == 0 {
             user_bet.amount_a
@@ -600,18 +611,15 @@ impl PredinexContract {
 
     /// Get a batch of pools for pagination-friendly listing.
     /// Returns pools from start_id up to count pools (or fewer if some don't exist).
-    /// Handles missing/gap pools safely by returning None for those positions.
     pub fn get_pools_batch(env: Env, start_id: u32, count: u32) -> Vec<Option<Pool>> {
         let mut pools = Vec::new(&env);
         let max_id = Self::get_pool_count(env.clone());
 
-        // Limit count to prevent excessive gas usage
         let effective_count = if count > 100 { 100 } else { count };
 
         for i in 0..effective_count {
             let pool_id = start_id + i;
             if pool_id >= max_id {
-                // No more pools exist, stop early
                 break;
             }
             let pool = env.storage().persistent().get(&DataKey::Pool(pool_id));
