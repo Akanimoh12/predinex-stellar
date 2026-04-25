@@ -10,6 +10,8 @@ import {
   getMarkets,
   getUserActivity,
 } from '../stacks-api';
+import { getUserActivityFromSoroban } from '../soroban-event-service';
+import type { ActivityItem } from './types';
 
 export function getStacksCoreApiBaseUrl(): string {
   return getRuntimeConfig().api.coreApiUrl;
@@ -25,10 +27,29 @@ export async function fetchPredinexContractEvents(limit: number): Promise<{
   return response.json();
 }
 
+/**
+ * Fetches user activity via the Soroban event pipeline.
+ * Falls back to an empty array if the Soroban contract ID is not configured.
+ */
+async function getUserActivitySoroban(
+  address: string,
+  limit: number
+): Promise<ActivityItem[]> {
+  const cfg = getRuntimeConfig();
+  const { soroban } = cfg;
+  return getUserActivityFromSoroban(address, limit, {
+    rpcUrl: soroban.rpcUrl,
+    explorerUrl: soroban.explorerUrl,
+    contractId: soroban.contractId,
+  });
+}
+
 export const predinexReadApi = {
   getPool,
   getUserBet,
   getTotalVolume,
   getMarkets,
+  /** @deprecated Use getUserActivitySoroban — kept for backwards compat */
   getUserActivity,
+  getUserActivitySoroban,
 };

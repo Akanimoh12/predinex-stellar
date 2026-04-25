@@ -13,6 +13,7 @@ interface UseUserActivityReturn {
 
 /**
  * Hook to fetch and manage a user's on-chain activity feed.
+ * Uses the Soroban event service to ingest contract events from Stellar.
  * Automatically fetches when an address is provided.
  */
 export function useUserActivity(
@@ -33,7 +34,7 @@ export function useUserActivity(
         setError(null);
 
         try {
-            const data = await predinexReadApi.getUserActivity(address, limit);
+            const data = await predinexReadApi.getUserActivitySoroban(address, limit);
             setActivities(data);
         } catch (e) {
             setError('Failed to load activity. Please try again.');
