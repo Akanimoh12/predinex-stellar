@@ -1157,4 +1157,73 @@ fn e5_get_pools_batch_handles_gaps() {
     assert!(batch.get(1).is_some(), "pool 2 should exist");
 }
 
+// ============================================================================
+// Issue: Duplicate outcome label rejection
+//
+// create_pool must reject pools where both outcome labels are identical after
+// normalization (case-insensitive, whitespace-trimmed).
+// ============================================================================
+
+/// D1: Identical outcome labels must be rejected.
+#[test]
+#[should_panic(expected = "Duplicate outcome labels")]
+fn d1_create_pool_identical_outcomes_rejected() {
+    let t = setup();
+    t.client.create_pool(
+        &t.admin,
+        &String::from_str(&t.env, "Market"),
+        &String::from_str(&t.env, "Desc"),
+        &String::from_str(&t.env, "Yes"),
+        &String::from_str(&t.env, "Yes"),
+        &3600u64,
+    );
+}
+
+/// D2: Same label with different casing must be rejected.
+#[test]
+#[should_panic(expected = "Duplicate outcome labels")]
+fn d2_create_pool_case_variant_outcomes_rejected() {
+    let t = setup();
+    t.client.create_pool(
+        &t.admin,
+        &String::from_str(&t.env, "Market"),
+        &String::from_str(&t.env, "Desc"),
+        &String::from_str(&t.env, "yes"),
+        &String::from_str(&t.env, "YES"),
+        &3600u64,
+    );
+}
+
+/// D3: Same label with surrounding whitespace must be rejected.
+#[test]
+#[should_panic(expected = "Duplicate outcome labels")]
+fn d3_create_pool_whitespace_padded_outcomes_rejected() {
+    let t = setup();
+    t.client.create_pool(
+        &t.admin,
+        &String::from_str(&t.env, "Market"),
+        &String::from_str(&t.env, "Desc"),
+        &String::from_str(&t.env, "Yes"),
+        &String::from_str(&t.env, " Yes "),
+        &3600u64,
+    );
+}
+
+/// D4: Distinct outcome labels must be accepted (normal behavior unchanged).
+#[test]
+fn d4_create_pool_distinct_outcomes_accepted() {
+    let t = setup();
+    let pool_id = t.client.create_pool(
+        &t.admin,
+        &String::from_str(&t.env, "Market"),
+        &String::from_str(&t.env, "Desc"),
+        &String::from_str(&t.env, "Yes"),
+        &String::from_str(&t.env, "No"),
+        &3600u64,
+    );
+    let pool = t.client.get_pool(&pool_id).expect("pool must exist");
+    assert_eq!(pool.outcome_a_name, String::from_str(&t.env, "Yes"));
+    assert_eq!(pool.outcome_b_name, String::from_str(&t.env, "No"));
+}
+
 }
