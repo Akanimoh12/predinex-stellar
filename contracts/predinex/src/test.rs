@@ -1157,4 +1157,93 @@ fn e5_get_pools_batch_handles_gaps() {
     assert!(batch.get(1).is_some(), "pool 2 should exist");
 }
 
+// ============================================================================
+// Delegated Settler: assign_settler and settle_pool authorization tests
+// ============================================================================
+
+/// F1: Delegated settler can settle a pool after expiry.
+#[test]
+fn f1_delegated_settler_can_settle_after_expiry() {
+    let t = setup();
+    let pool_id = make_pool(&t);
+
+    let settler = Address::generate(&t.env);
+    t.client.assign_settler(&t.admin, &pool_id, &settler);
+
+    expire_pool(&t.env);
+
+    t.client.settle_pool(&settler, &pool_id, &0u32);
+
+    let pool = t.client.get_pool(&pool_id).expect("pool must exist");
+    assert!(pool.settled, "pool must be settled");
+    assert_eq!(pool.winning_outcome, Some(0u32));
+}
+
+/// F2: Unauthorized address cannot settle even after expiry.
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn f2_unauthorized_address_cannot_settle() {
+    let t = setup();
+    let pool_id = make_pool(&t);
+
+    let settler = Address::generate(&t.env);
+    t.client.assign_settler(&t.admin, &pool_id, &settler);
+
+    let random = Address::generate(&t.env);
+    expire_pool(&t.env);
+
+    t.client.settle_pool(&random, &pool_id, &0u32);
+}
+
+/// F3: Only the creator can assign a settler.
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn f3_non_creator_cannot_assign_settler() {
+    let t = setup();
+    let pool_id = make_pool(&t);
+
+    let non_creator = Address::generate(&t.env);
+    let settler = Address::generate(&t.env);
+
+    t.client.assign_settler(&non_creator, &pool_id, &settler);
+}
+
+/// F4: Creator can still settle without a delegated settler assigned.
+#[test]
+fn f4_creator_can_settle_without_delegated_settler() {
+    let t = setup();
+    let pool_id = make_pool(&t);
+
+    expire_pool(&t.env);
+
+    t.client.settle_pool(&t.admin, &pool_id, &1u32);
+
+    let pool = t.client.get_pool(&pool_id).expect("pool must exist");
+    assert!(pool.settled);
+    assert_eq!(pool.winning_outcome, Some(1u32));
+}
+
+/// F5: get_delegated_settler returns the assigned settler.
+#[test]
+fn f5_get_delegated_settler_returns_assigned_address() {
+    let t = setup();
+    let pool_id = make_pool(&t);
+
+    let settler = Address::generate(&t.env);
+    t.client.assign_settler(&t.admin, &pool_id, &settler);
+
+    let stored = t.client.get_delegated_settler(&pool_id);
+    assert_eq!(stored, Some(settler));
+}
+
+/// F6: get_delegated_settler returns None when no settler assigned.
+#[test]
+fn f6_get_delegated_settler_returns_none_when_unset() {
+    let t = setup();
+    let pool_id = make_pool(&t);
+
+    let stored = t.client.get_delegated_settler(&pool_id);
+    assert!(stored.is_none());
+}
+
 }

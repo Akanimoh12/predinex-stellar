@@ -12,6 +12,7 @@ pub enum DataKey {
     Token,
     Treasury,
     TreasuryRecipient,
+    DelegatedSettler(u32),
 }
 
 #[derive(Clone)]
@@ -169,6 +170,37 @@ impl PredinexContract {
         );
     }
 
+    /// Assign a delegated settler for a pool. Only the pool creator can call this.
+    pub fn assign_settler(env: Env, creator: Address, pool_id: u32, settler: Address) {
+        creator.require_auth();
+
+        let pool = env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+            .expect("Pool not found");
+
+        if creator != pool.creator {
+            panic!("Unauthorized");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DelegatedSettler(pool_id), &settler);
+
+        env.events().publish(
+            (Symbol::new(&env, "assign_settler"), pool_id),
+            (creator, settler),
+        );
+    }
+
+    /// Get the delegated settler for a pool, if one has been assigned.
+    pub fn get_delegated_settler(env: Env, pool_id: u32) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DelegatedSettler(pool_id))
+    }
+
     pub fn settle_pool(env: Env, caller: Address, pool_id: u32, winning_outcome: u32) {
         caller.require_auth();
 
@@ -178,7 +210,16 @@ impl PredinexContract {
             .get::<_, Pool>(&DataKey::Pool(pool_id))
             .expect("Pool not found");
 
-        if caller != pool.creator {
+        // Allow creator or delegated settler
+        let delegated_settler: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatedSettler(pool_id));
+
+        let is_authorized = caller == pool.creator
+            || delegated_settler.map(|s| s == caller).unwrap_or(false);
+
+        if !is_authorized {
             panic!("Unauthorized");
         }
 
@@ -203,7 +244,7 @@ impl PredinexContract {
             .set(&DataKey::Pool(pool_id), &pool);
 
         env.events()
-            .publish((Symbol::new(&env, "settle_pool"), pool_id), winning_outcome);
+            .publish((Symbol::new(&env, "settle_pool"), pool_id), (caller, winning_outcome));
     }
 
     pub fn claim_winnings(env: Env, user: Address, pool_id: u32) -> i128 {
@@ -353,7 +394,7 @@ impl PredinexContract {
     /// Handles missing/gap pools safely by returning None for those positions.
     pub fn get_pools_batch(env: Env, start_id: u32, count: u32) -> Vec<Option<Pool>> {
         let mut pools = Vec::new(&env);
-        let max_id = Self::get_pool_count(&env);
+        let max_id = Self::get_pool_count(env.clone());
 
         // Limit count to prevent excessive gas usage
         let effective_count = if count > 100 { 100 } else { count };
