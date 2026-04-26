@@ -138,6 +138,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "participant_count"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "settled"
                       },
                       "val": {
@@ -146,9 +154,15 @@
                     },
                     {
                       "key": {
-                        "symbol": "settled_at"
+                        "symbol": "status"
                       },
-                      "val": "void"
+                      "val": {
+                        "vec": [
+                          {
+                            "symbol": "Open"
+                          }
+                        ]
+                      }
                     },
                     {
                       "key": {
