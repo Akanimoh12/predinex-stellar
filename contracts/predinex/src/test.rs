@@ -2553,3 +2553,136 @@ fn l4_successful_claim_reconciles_treasury_and_balances() {
         "remaining contract balance must equal the unclaimed treasury fee"
     );
 }
+
+// ── #159 preview_claimable_amount ────────────────────────────────────────────
+
+/// Helper: set up a contract + token, create a pool, and return all handles.
+fn setup_preview_env(
+    env: &Env,
+) -> (
+    PredinexContractClient<'_>,
+    token::Client<'_>,
+    token::StellarAssetClient<'_>,
+    Address, // contract_id
+    Address, // creator
+    Address, // user_a (bets on A)
+    Address, // user_b (bets on B)
+    u32,     // pool_id
+) {
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(env, &contract_id);
+
+    let token_admin = Address::generate(env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = token::Client::new(env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(env);
+    let user_a = Address::generate(env);
+    let user_b = Address::generate(env);
+
+    token_admin_client.mint(&user_a, &1000);
+    token_admin_client.mint(&user_b, &1000);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(env, "Preview Test"),
+        &String::from_str(env, ""),
+        &String::from_str(env, "Yes"),
+        &String::from_str(env, "No"),
+        &3600u64,
+    );
+
+    (
+        client,
+        token,
+        token_admin_client,
+        contract_id,
+        creator,
+        user_a,
+        user_b,
+        pool_id,
+    )
+}
+
+/// AC: Call the preview method before settlement and verify the response
+/// reflects the unclaimable state.
+#[test]
+fn test_preview_claimable_amount_before_settlement() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _token, _token_admin, _contract_id, _creator, user_a, user_b, pool_id) =
+        setup_preview_env(&env);
+
+    // user_a bets on A, user_b bets on B — pool is still Open
+    client.place_bet(&user_a, &pool_id, &0, &300);
+    client.place_bet(&user_b, &pool_id, &1, &200);
+
+    // Both users should see Unclaimable while the pool is open
+    assert_eq!(
+        client.preview_claimable_amount(&pool_id, &user_a),
+        ClaimPreview::Unclaimable,
+        "winner-side bettor must see Unclaimable before settlement"
+    );
+    assert_eq!(
+        client.preview_claimable_amount(&pool_id, &user_b),
+        ClaimPreview::Unclaimable,
+        "loser-side bettor must see Unclaimable before settlement"
+    );
+
+    // A user with no position also sees Unclaimable (pool not settled)
+    let outsider = Address::generate(&env);
+    assert_eq!(
+        client.preview_claimable_amount(&pool_id, &outsider),
+        ClaimPreview::Unclaimable,
+        "non-participant must see Unclaimable before settlement"
+    );
+}
+
+/// AC: Call the preview method after settlement and verify it matches the
+/// amount returned by claim_winnings.
+#[test]
+fn test_preview_claimable_amount_after_settlement_matches_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _token, _token_admin, _contract_id, creator, user_a, user_b, pool_id) =
+        setup_preview_env(&env);
+
+    client.place_bet(&user_a, &pool_id, &0, &300); // bets on A
+    client.place_bet(&user_b, &pool_id, &1, &200); // bets on B
+
+    // Advance time past expiry and settle — outcome A wins
+    env.ledger().with_mut(|l| l.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0);
+
+    // user_a (winner): preview must equal what claim_winnings returns
+    let preview_winner = client.preview_claimable_amount(&pool_id, &user_a);
+    let expected_amount = match preview_winner.clone() {
+        ClaimPreview::Claimable(v) => v,
+        other => panic!("expected Claimable, got {:?}", other),
+    };
+    let actual_winnings = client.claim_winnings(&user_a, &pool_id);
+    assert_eq!(
+        expected_amount, actual_winnings,
+        "preview must match claim_winnings exactly"
+    );
+
+    // user_b (loser): NotEligible
+    assert_eq!(
+        client.preview_claimable_amount(&pool_id, &user_b),
+        ClaimPreview::NotEligible,
+        "loser must see NotEligible after settlement"
+    );
+
+    // outsider (no position): NeverBet
+    let outsider = Address::generate(&env);
+    assert_eq!(
+        client.preview_claimable_amount(&pool_id, &outsider),
+        ClaimPreview::NeverBet,
+        "non-participant must see NeverBet after settlement"
+    );
+}

@@ -130,6 +130,29 @@ pub struct UserPoolPosition {
     pub total_bet: i128,
 }
 
+/// #159 — Result type returned by `preview_claimable_amount`.
+///
+/// Variants
+/// --------
+/// - `Unclaimable`  – pool is not yet settled (or is frozen/disputed/cancelled);
+///                    no payout is available regardless of the user's position.
+/// - `NeverBet`     – pool is settled but the user has no position (or already claimed).
+/// - `NotEligible`  – pool is settled; user bet on the losing side.
+/// - `Claimable(i128)` – pool is settled; user bet on the winning side and the
+///                    value equals exactly what `claim_winnings` would transfer.
+#[derive(Clone, PartialEq, Debug)]
+#[contracttype]
+pub enum ClaimPreview {
+    /// Pool is not in a settled state; payout cannot be computed yet.
+    Unclaimable,
+    /// User has no active position in this pool (never bet or already claimed).
+    NeverBet,
+    /// User bet on the losing side; no payout available.
+    NotEligible,
+    /// User bet on the winning side; value is the exact transferable amount.
+    Claimable(i128),
+}
+
 /// Event payload emitted by `place_bet`.
 ///
 /// Fields
@@ -1099,6 +1122,70 @@ impl PredinexContract {
                 None => ClaimStatus::NeverBet,
             },
         }
+    }
+
+    /// #159 — Read-only payout preview for a user in a given pool.
+    ///
+    /// Returns a `ClaimPreview` that the frontend can use to display the
+    /// claimable amount or explain why nothing is claimable, without
+    /// reimplementing payout logic off-chain.
+    ///
+    /// The `Claimable(amount)` value is computed with the same formula used by
+    /// `claim_winnings`, so the preview is always exact for settled pools.
+    ///
+    /// | Pool status          | Bet record          | Result              |
+    /// |----------------------|---------------------|---------------------|
+    /// | Open / Frozen /      | any                 | Unclaimable         |
+    /// | Disputed / Cancelled |                     |                     |
+    /// | Voided               | any                 | Unclaimable         |
+    /// | Settled(w)           | absent / claimed    | NeverBet            |
+    /// | Settled(w)           | losing side only    | NotEligible         |
+    /// | Settled(w)           | winning side > 0    | Claimable(amount)   |
+    pub fn preview_claimable_amount(env: Env, pool_id: u32, user: Address) -> ClaimPreview {
+        let pool = match env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+        {
+            Some(p) => p,
+            None => return ClaimPreview::Unclaimable,
+        };
+
+        let winning_outcome = match pool.status {
+            PoolStatus::Settled(outcome) => outcome,
+            _ => return ClaimPreview::Unclaimable,
+        };
+
+        let bet: UserBet = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserBet(pool_id, user))
+        {
+            Some(b) => b,
+            None => return ClaimPreview::NeverBet,
+        };
+
+        let user_winning_bet = if winning_outcome == 0 {
+            bet.amount_a
+        } else {
+            bet.amount_b
+        };
+
+        if user_winning_bet == 0 {
+            return ClaimPreview::NotEligible;
+        }
+
+        let pool_winning_total = if winning_outcome == 0 {
+            pool.total_a
+        } else {
+            pool.total_b
+        };
+        let total_pool_balance = pool.total_a + pool.total_b;
+        let fee = (total_pool_balance * 2) / 100;
+        let net_pool_balance = total_pool_balance - fee;
+        let amount = (user_winning_bet * net_pool_balance) / pool_winning_total;
+
+        ClaimPreview::Claimable(amount)
     }
 
     pub fn get_participant_count(env: Env, pool_id: u32) -> u32 {
