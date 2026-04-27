@@ -130,6 +130,29 @@ pub struct UserPoolPosition {
     pub total_bet: i128,
 }
 
+/// #196 — Per-pool revenue entry returned by `get_revenue_history`.
+///
+/// Fields
+/// ------
+/// - `pool_id`      – identifies the pool
+/// - `settled_at`   – ledger timestamp at which the pool was created (used as
+///                    a proxy for settlement ordering; pools are settled after
+///                    expiry which is `created_at + duration`)
+/// - `total_volume` – `total_a + total_b` at settlement time
+/// - `fee`          – protocol fee collected: `total_volume * 2 / 100`
+///
+/// The `fee` value is derived from the same formula used in `claim_winnings`
+/// and `settle_pool`, so it is always consistent with on-chain state.
+/// Unsettled, voided, or cancelled pools are excluded from the result set.
+#[derive(Clone)]
+#[contracttype]
+pub struct PoolRevenue {
+    pub pool_id: u32,
+    pub settled_at: u64,
+    pub total_volume: i128,
+    pub fee: i128,
+}
+
 /// Event payload emitted by `place_bet`.
 ///
 /// Fields
@@ -1099,6 +1122,58 @@ impl PredinexContract {
                 None => ClaimStatus::NeverBet,
             },
         }
+    }
+
+    /// #196 — Bounded range scan returning per-pool protocol revenue.
+    ///
+    /// Scans pool IDs `[start_id, start_id + count)` and returns one
+    /// `PoolRevenue` entry for every pool that is in a `Settled` state.
+    /// Unsettled, voided, cancelled, and missing pools are silently skipped.
+    ///
+    /// The scan is capped at 100 pools per call to bound compute costs.
+    /// Callers paginate by advancing `start_id` by `count` on each call.
+    /// Results are returned in ascending `pool_id` order, which is also
+    /// ascending settlement order (pools are settled after their expiry and
+    /// pool IDs are monotonically increasing), giving dashboards a
+    /// deterministic, chart-ready time series.
+    ///
+    /// # Arguments
+    /// * `start_id` – first pool ID to include in the scan (inclusive)
+    /// * `count`    – number of pool IDs to scan; capped at 100
+    ///
+    /// # Returns
+    /// `Vec<PoolRevenue>` — one entry per settled pool in the scanned range,
+    /// ordered by ascending `pool_id`. An empty vec means no settled pools
+    /// exist in the range.
+    pub fn get_revenue_history(env: Env, start_id: u32, count: u32) -> Vec<PoolRevenue> {
+        let mut result = Vec::new(&env);
+        let max_id = Self::get_pool_count(env.clone());
+        let effective_count = if count > 100 { 100 } else { count };
+
+        for i in 0..effective_count {
+            let pool_id = start_id + i;
+            if pool_id >= max_id {
+                break;
+            }
+            if let Some(pool) = env
+                .storage()
+                .persistent()
+                .get::<_, Pool>(&DataKey::Pool(pool_id))
+            {
+                if matches!(pool.status, PoolStatus::Settled(_)) {
+                    let total_volume = pool.total_a + pool.total_b;
+                    let fee = (total_volume * 2) / 100;
+                    result.push_back(PoolRevenue {
+                        pool_id,
+                        settled_at: pool.expiry,
+                        total_volume,
+                        fee,
+                    });
+                }
+            }
+        }
+
+        result
     }
 
     pub fn get_participant_count(env: Env, pool_id: u32) -> u32 {

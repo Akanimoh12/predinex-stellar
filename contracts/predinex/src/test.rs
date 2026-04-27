@@ -2553,3 +2553,157 @@ fn l4_successful_claim_reconciles_treasury_and_balances() {
         "remaining contract balance must equal the unclaimed treasury fee"
     );
 }
+
+// ── #196 get_revenue_history ──────────────────────────────────────────────────
+
+/// Shared setup: initialised contract + token, returns client and helpers.
+fn setup_revenue_env(
+    env: &Env,
+) -> (
+    PredinexContractClient<'_>,
+    token::StellarAssetClient<'_>,
+    Address, // creator
+) {
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(env, &contract_id);
+
+    let token_admin = Address::generate(env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(env);
+    (client, token_admin_client, creator)
+}
+
+/// Settle a pool: mint tokens to two bettors, place bets, advance time, settle.
+/// Returns (pool_id, expected_fee).
+fn settle_pool_with_volume(
+    env: &Env,
+    client: &PredinexContractClient<'_>,
+    token_admin: &token::StellarAssetClient<'_>,
+    creator: &Address,
+    amount_a: i128,
+    amount_b: i128,
+    base_ts: u64,
+) -> (u32, i128) {
+    let user_a = Address::generate(env);
+    let user_b = Address::generate(env);
+    token_admin.mint(&user_a, &amount_a);
+    token_admin.mint(&user_b, &amount_b);
+
+    env.ledger().with_mut(|l| l.timestamp = base_ts);
+    let pool_id = client.create_pool(
+        creator,
+        &String::from_str(env, "Revenue Pool"),
+        &String::from_str(env, ""),
+        &String::from_str(env, "Yes"),
+        &String::from_str(env, "No"),
+        &3600u64,
+    );
+    client.place_bet(&user_a, &pool_id, &0, &amount_a);
+    client.place_bet(&user_b, &pool_id, &1, &amount_b);
+
+    env.ledger().with_mut(|l| l.timestamp = base_ts + 3601);
+    client.settle_pool(creator, &pool_id, &0);
+
+    let total = amount_a + amount_b;
+    let fee = (total * 2) / 100;
+    (pool_id, fee)
+}
+
+/// AC: Generate revenue across multiple pools and verify the history read path
+/// returns all relevant entries.
+#[test]
+fn test_revenue_history_returns_all_settled_pools() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, token_admin, creator) = setup_revenue_env(&env);
+
+    // Settle three pools with distinct volumes.
+    let (id0, fee0) = settle_pool_with_volume(&env, &client, &token_admin, &creator, 300, 200, 0);
+    let (id1, fee1) =
+        settle_pool_with_volume(&env, &client, &token_admin, &creator, 500, 500, 10000);
+    let (id2, fee2) =
+        settle_pool_with_volume(&env, &client, &token_admin, &creator, 100, 900, 20000);
+
+    // Scan the full range.
+    let history = client.get_revenue_history(&id0, &3);
+
+    assert_eq!(history.len(), 3, "all three settled pools must appear");
+
+    assert_eq!(history.get(0).unwrap().pool_id, id0);
+    assert_eq!(history.get(0).unwrap().fee, fee0);
+    assert_eq!(history.get(0).unwrap().total_volume, 500);
+
+    assert_eq!(history.get(1).unwrap().pool_id, id1);
+    assert_eq!(history.get(1).unwrap().fee, fee1);
+    assert_eq!(history.get(1).unwrap().total_volume, 1000);
+
+    assert_eq!(history.get(2).unwrap().pool_id, id2);
+    assert_eq!(history.get(2).unwrap().fee, fee2);
+    assert_eq!(history.get(2).unwrap().total_volume, 1000);
+}
+
+/// AC: Query the history in bounded ranges and verify pagination / ordering is
+/// deterministic.
+#[test]
+fn test_revenue_history_pagination_is_deterministic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, token_admin, creator) = setup_revenue_env(&env);
+
+    // Settle four pools.
+    let (id0, fee0) = settle_pool_with_volume(&env, &client, &token_admin, &creator, 200, 100, 0);
+    let (id1, fee1) =
+        settle_pool_with_volume(&env, &client, &token_admin, &creator, 400, 100, 10000);
+    let (id2, fee2) =
+        settle_pool_with_volume(&env, &client, &token_admin, &creator, 600, 100, 20000);
+    let (id3, fee3) =
+        settle_pool_with_volume(&env, &client, &token_admin, &creator, 800, 100, 30000);
+
+    // Page 1: first two pools.
+    let page1 = client.get_revenue_history(&id0, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0).unwrap().pool_id, id0);
+    assert_eq!(page1.get(0).unwrap().fee, fee0);
+    assert_eq!(page1.get(1).unwrap().pool_id, id1);
+    assert_eq!(page1.get(1).unwrap().fee, fee1);
+
+    // Page 2: next two pools.
+    let page2 = client.get_revenue_history(&id2, &2);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2.get(0).unwrap().pool_id, id2);
+    assert_eq!(page2.get(0).unwrap().fee, fee2);
+    assert_eq!(page2.get(1).unwrap().pool_id, id3);
+    assert_eq!(page2.get(1).unwrap().fee, fee3);
+
+    // Ordering: fees must be strictly ascending (volumes grow with each pool).
+    assert!(
+        page1.get(0).unwrap().fee < page1.get(1).unwrap().fee,
+        "entries within a page must be in ascending pool_id order"
+    );
+    assert!(
+        page2.get(0).unwrap().fee < page2.get(1).unwrap().fee,
+        "entries within a page must be in ascending pool_id order"
+    );
+
+    // Unsettled pool is excluded: create a pool but do not settle it.
+    let unsettled_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Unsettled"),
+        &String::from_str(&env, ""),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &9999u64,
+    );
+    let page3 = client.get_revenue_history(&unsettled_id, &1);
+    assert_eq!(
+        page3.len(),
+        0,
+        "unsettled pool must not appear in revenue history"
+    );
+}
