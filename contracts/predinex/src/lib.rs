@@ -2,6 +2,8 @@
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec};
 
 mod test;
+mod protocol_fee_tests;
+mod pause_tests;
 
 #[derive(Clone)]
 #[contracttype]
@@ -17,6 +19,9 @@ pub enum DataKey {
     /// #179 — per-pool creation fee in stroops. Set by the admin via
     /// `set_creation_fee`; defaults to 0 (no fee) when absent.
     CreationFee,
+    /// #167 — protocol fee in basis points. Set by the treasury recipient via
+    /// `set_protocol_fee`; defaults to 200 (2%) when absent.
+    ProtocolFee,
 }
 
 // #189 — TTL bump policy for persistent storage entries.
@@ -31,6 +36,14 @@ pub enum DataKey {
 const LEDGERS_PER_DAY: u32 = 17_280;
 const POOL_BUMP_TARGET: u32 = LEDGERS_PER_DAY * 30; // extend to 30 days
 const POOL_BUMP_THRESHOLD: u32 = LEDGERS_PER_DAY * 25; // trigger bump when < 25 days remain
+
+/// #167 — Protocol fee bounds in basis points.
+/// Minimum fee: 0 (0%) — no fee floor, allows fee-free operation.
+/// Maximum fee: 1000 (10%) — protects users from excessive fees.
+/// Default fee: 200 (2%) — matches the original hard-coded value.
+const PROTOCOL_FEE_MIN_BPS: u32 = 0;
+const PROTOCOL_FEE_MAX_BPS: u32 = 1000;
+const PROTOCOL_FEE_DEFAULT_BPS: u32 = 200;
 
 /// Explicit lifecycle status for a prediction pool.
 ///
@@ -130,6 +143,29 @@ pub struct UserPoolPosition {
     pub total_bet: i128,
 }
 
+/// #159 — Result type returned by `preview_claimable_amount`.
+///
+/// Variants
+/// --------
+/// - `Unclaimable`  – pool is not yet settled (or is frozen/disputed/cancelled);
+///                    no payout is available regardless of the user's position.
+/// - `NeverBet`     – pool is settled but the user has no position (or already claimed).
+/// - `NotEligible`  – pool is settled; user bet on the losing side.
+/// - `Claimable(i128)` – pool is settled; user bet on the winning side and the
+///                    value equals exactly what `claim_winnings` would transfer.
+#[derive(Clone, PartialEq, Debug)]
+#[contracttype]
+pub enum ClaimPreview {
+    /// Pool is not in a settled state; payout cannot be computed yet.
+    Unclaimable,
+    /// User has no active position in this pool (never bet or already claimed).
+    NeverBet,
+    /// User bet on the losing side; no payout available.
+    NotEligible,
+    /// User bet on the winning side; value is the exact transferable amount.
+    Claimable(i128),
+}
+
 /// Event payload emitted by `place_bet`.
 ///
 /// Fields
@@ -151,6 +187,27 @@ pub struct BetEvent {
     pub amount_a: i128,
     pub amount_b: i128,
     pub total_bet: i128,
+}
+
+/// #169 — Event payload emitted by `create_pool`.
+///
+/// Fields
+/// ------\n/// - `creator`        – address that created the pool
+/// - `expiry`         – unix timestamp when the pool expires
+/// - `title`          – short market title
+/// - `outcome_a_name` – label for outcome A
+/// - `outcome_b_name` – label for outcome B
+///
+/// This payload allows indexers to populate a lightweight market list entry
+/// without performing follow-up reads for every new pool.
+#[derive(Clone)]
+#[contracttype]
+pub struct CreatePoolEvent {
+    pub creator: Address,
+    pub expiry: u64,
+    pub title: String,
+    pub outcome_a_name: String,
+    pub outcome_b_name: String,
 }
 
 #[contract]
@@ -195,6 +252,56 @@ impl PredinexContract {
             .persistent()
             .get::<_, i128>(&DataKey::CreationFee)
             .unwrap_or(0)
+    }
+
+    /// #167 — Set the protocol fee in basis points.
+    ///
+    /// Only the treasury recipient may call this. The fee must be within
+    /// [PROTOCOL_FEE_MIN_BPS, PROTOCOL_FEE_MAX_BPS] (0–1000 basis points, i.e., 0–10%).
+    /// The fee applies to future settlements and claims; existing settled pools
+    /// are not affected.
+    ///
+    /// # Arguments
+    /// * `caller` – must be the current treasury recipient
+    /// * `fee_bps` – new fee in basis points (1 bp = 0.01%)
+    ///
+    /// # Panics
+    /// * "Unauthorized" – if caller is not the treasury recipient
+    /// * "Fee out of bounds" – if fee_bps is outside [0, 1000]
+    pub fn set_protocol_fee(env: Env, caller: Address, fee_bps: u32) {
+        caller.require_auth();
+        let treasury_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryRecipient)
+            .expect("Not initialized");
+        if caller != treasury_recipient {
+            panic!("Unauthorized");
+        }
+        if fee_bps < PROTOCOL_FEE_MIN_BPS || fee_bps > PROTOCOL_FEE_MAX_BPS {
+            panic!("Fee out of bounds");
+        }
+        env.storage().persistent().set(&DataKey::ProtocolFee, &fee_bps);
+
+        env.events().publish(
+            (Symbol::new(&env, "protocol_fee_set"),),
+            (caller, fee_bps),
+        );
+    }
+
+    /// #166 — Return the current protocol fee in basis points.
+    ///
+    /// The returned value is the canonical source of truth for fee display
+    /// in frontends and analytics. Use `get_protocol_fee` to preview fees
+    /// before placing bets or claiming winnings.
+    ///
+    /// # Returns
+    /// The protocol fee in basis points (default: 200 = 2%).
+    pub fn get_protocol_fee(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::ProtocolFee)
+            .unwrap_or(PROTOCOL_FEE_DEFAULT_BPS)
     }
 
     /// Normalize a Soroban `String` to a comparable form by converting to
@@ -268,15 +375,19 @@ impl PredinexContract {
 
         let pool_id = Self::get_pool_counter(&env);
 
+        if duration == 0 || duration > MAX_POOL_DURATION {
+            panic!(format!("Duration must be between 1 and {} seconds", MAX_POOL_DURATION));
+        }
+
         let created_at = env.ledger().timestamp();
-        let expiry = created_at + duration;
+        let expiry = created_at.checked_add(duration).expect("Expiry overflow");
 
         let pool = Pool {
             creator: creator.clone(),
-            title,
+            title: title.clone(),
             description,
-            outcome_a_name: outcome_a,
-            outcome_b_name: outcome_b,
+            outcome_a_name: outcome_a.clone(),
+            outcome_b_name: outcome_b.clone(),
             total_a: 0,
             total_b: 0,
             participant_count: 0,
@@ -301,9 +412,16 @@ impl PredinexContract {
             .persistent()
             .set(&DataKey::PoolCounter, &(pool_id + 1));
 
+        // #169 — emit enriched create_pool event with expiry and metadata summary
         env.events().publish(
             (Symbol::new(&env, "create_pool"), pool_id),
-            (creator, Symbol::new(&env, "Open")),
+            CreatePoolEvent {
+                creator: creator.clone(),
+                expiry,
+                title,
+                outcome_a_name: outcome_a,
+                outcome_b_name: outcome_b,
+            },
         );
 
         pool_id
@@ -344,9 +462,9 @@ impl PredinexContract {
         token_client.transfer(&user, &env.current_contract_address(), &amount);
 
         if outcome == 0 {
-            pool.total_a += amount;
+            pool.total_a = pool.total_a.checked_add(amount).expect("Pool total overflow");
         } else {
-            pool.total_b += amount;
+            pool.total_b = pool.total_b.checked_add(amount).expect("Pool total overflow");
         }
 
         let mut user_bet = env
@@ -375,11 +493,11 @@ impl PredinexContract {
         );
 
         if outcome == 0 {
-            user_bet.amount_a += amount;
+            user_bet.amount_a = user_bet.amount_a.checked_add(amount).expect("User bet overflow");
         } else {
-            user_bet.amount_b += amount;
+            user_bet.amount_b = user_bet.amount_b.checked_add(amount).expect("User bet overflow");
         }
-        user_bet.total_bet += amount;
+        user_bet.total_bet = user_bet.total_bet.checked_add(amount).expect("User bet overflow");
 
         env.storage()
             .persistent()
@@ -509,13 +627,15 @@ impl PredinexContract {
         pool.winning_outcome = Some(winning_outcome);
 
         // #171 — compute totals for the enriched settlement event.
+        // #167 — use configurable protocol fee instead of hard-coded 2%.
         let winning_side_total = if winning_outcome == 0 {
             pool.total_a
         } else {
             pool.total_b
         };
         let total_pool_volume = pool.total_a + pool.total_b;
-        let fee_amount = (total_pool_volume * 2) / 100;
+        let fee_bps = Self::get_protocol_fee(env.clone()) as i128;
+        let fee_amount = (total_pool_volume * fee_bps) / 10000;
 
         env.storage()
             .persistent()
@@ -675,7 +795,8 @@ impl PredinexContract {
         };
         let total_pool_balance = pool.total_a + pool.total_b;
 
-        let fee = (total_pool_balance * 2) / 100;
+        let fee_bps = Self::get_protocol_fee(env.clone()) as i128;
+        let fee = (total_pool_balance * fee_bps) / 10000;
         let net_pool_balance = total_pool_balance - fee;
 
         let winnings = (user_winning_bet * net_pool_balance) / pool_winning_total;
@@ -696,9 +817,12 @@ impl PredinexContract {
             .persistent()
             .get(&DataKey::Treasury)
             .unwrap_or(0);
+        let updated_treasury = current_treasury
+            .checked_add(fee)
+            .expect("Treasury total overflow");
         env.storage()
             .persistent()
-            .set(&DataKey::Treasury, &(current_treasury + fee));
+            .set(&DataKey::Treasury, &updated_treasury);
 
         // Step 4: remove the bet record to prevent duplicate claims.
         env.storage()
@@ -710,7 +834,12 @@ impl PredinexContract {
             .publish((Symbol::new(&env, "fee_collected"), pool_id), fee);
         env.events().publish(
             (Symbol::new(&env, "claim_winnings"), pool_id, user),
-            winnings,
+            ClaimEvent {
+                amount: winnings,
+                fee_amount: fee,
+                winning_outcome,
+                total_pool_size: total_pool_balance,
+            },
         );
 
         winnings
@@ -1117,6 +1246,70 @@ impl PredinexContract {
                 None => ClaimStatus::NeverBet,
             },
         }
+    }
+
+    /// #159 — Read-only payout preview for a user in a given pool.
+    ///
+    /// Returns a `ClaimPreview` that the frontend can use to display the
+    /// claimable amount or explain why nothing is claimable, without
+    /// reimplementing payout logic off-chain.
+    ///
+    /// The `Claimable(amount)` value is computed with the same formula used by
+    /// `claim_winnings`, so the preview is always exact for settled pools.
+    ///
+    /// | Pool status          | Bet record          | Result              |
+    /// |----------------------|---------------------|---------------------|
+    /// | Open / Frozen /      | any                 | Unclaimable         |
+    /// | Disputed / Cancelled |                     |                     |
+    /// | Voided               | any                 | Unclaimable         |
+    /// | Settled(w)           | absent / claimed    | NeverBet            |
+    /// | Settled(w)           | losing side only    | NotEligible         |
+    /// | Settled(w)           | winning side > 0    | Claimable(amount)   |
+    pub fn preview_claimable_amount(env: Env, pool_id: u32, user: Address) -> ClaimPreview {
+        let pool = match env
+            .storage()
+            .persistent()
+            .get::<_, Pool>(&DataKey::Pool(pool_id))
+        {
+            Some(p) => p,
+            None => return ClaimPreview::Unclaimable,
+        };
+
+        let winning_outcome = match pool.status {
+            PoolStatus::Settled(outcome) => outcome,
+            _ => return ClaimPreview::Unclaimable,
+        };
+
+        let bet: UserBet = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserBet(pool_id, user))
+        {
+            Some(b) => b,
+            None => return ClaimPreview::NeverBet,
+        };
+
+        let user_winning_bet = if winning_outcome == 0 {
+            bet.amount_a
+        } else {
+            bet.amount_b
+        };
+
+        if user_winning_bet == 0 {
+            return ClaimPreview::NotEligible;
+        }
+
+        let pool_winning_total = if winning_outcome == 0 {
+            pool.total_a
+        } else {
+            pool.total_b
+        };
+        let total_pool_balance = pool.total_a + pool.total_b;
+        let fee = (total_pool_balance * 2) / 100;
+        let net_pool_balance = total_pool_balance - fee;
+        let amount = (user_winning_bet * net_pool_balance) / pool_winning_total;
+
+        ClaimPreview::Claimable(amount)
     }
 
     pub fn get_participant_count(env: Env, pool_id: u32) -> u32 {

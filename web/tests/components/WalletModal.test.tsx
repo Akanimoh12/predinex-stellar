@@ -82,6 +82,20 @@ describe('WalletModal Component', () => {
         expect(mockOnClose).toHaveBeenCalled();
     });
 
+    it('shows a loading indicator and disables wallet choices while checking availability', () => {
+        render(
+            <WalletModal
+                isOpen={true}
+                onClose={mockOnClose}
+                onSelectWallet={mockOnSelectWallet}
+                isLoading={true}
+            />
+        );
+
+        expect(screen.getByRole('status')).toHaveTextContent(/checking wallet availability/i);
+        expect(screen.getByRole('button', { name: /Connect using WalletConnect \(Available\)/i })).toBeDisabled();
+    });
+
     it('displays error gracefully when error prop is provided', () => {
         const errorMessage = 'Unsupported provider. Please use a Stellar-compatible wallet.';
         render(

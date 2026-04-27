@@ -13,9 +13,10 @@ interface WalletModalProps {
     onClose: () => void;
     onSelectWallet: (walletType: 'leather' | 'xverse' | 'walletconnect') => void;
     error?: string;
+    isLoading?: boolean;
 }
 
-export default function WalletModal({ isOpen, onClose, onSelectWallet, error }: WalletModalProps) {
+export default function WalletModal({ isOpen, onClose, onSelectWallet, error, isLoading = false }: WalletModalProps) {
     // Derived directly from isOpen — no state or effect needed; isWalletAvailable is
     // SSR-safe and cheap to call on each render.
     const walletAvailability: Record<WalletType, boolean> = isOpen
@@ -66,6 +67,16 @@ export default function WalletModal({ isOpen, onClose, onSelectWallet, error }: 
                     </button>
                 </div>
 
+                {isLoading && (
+                    <div
+                        role="status"
+                        aria-live="polite"
+                        className="mb-6 rounded-xl border border-border bg-muted/10 p-4 text-sm text-foreground animate-in fade-in"
+                    >
+                        Checking wallet availability…
+                    </div>
+                )}
+
                 {error && (
                     <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3 text-red-500 animate-in fade-in slide-in-from-top-2">
                         <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
@@ -83,7 +94,7 @@ export default function WalletModal({ isOpen, onClose, onSelectWallet, error }: 
                                     onSelectWallet(wallet.id);
                                     onClose();
                                 }}
-                                disabled={!wallet.isSupported || (!walletAvailability[wallet.id] && wallet.id !== 'walletconnect')}
+                                disabled={isLoading || !wallet.isSupported || (!walletAvailability[wallet.id] && wallet.id !== 'walletconnect')}
                                 aria-label={!wallet.isSupported
                                     ? `Connect using ${wallet.name} (Unsupported)`
                                     : walletAvailability[wallet.id]
