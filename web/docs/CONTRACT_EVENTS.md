@@ -175,6 +175,56 @@ interface ClaimWinningsEvent {
 }
 ```
 
+> Per-claim payout is computed via integer floor division. The 2 % protocol fee is credited to the treasury **once per pool** (on the first claim — see `fee_collected`), and any rounding remainder is swept on the final claim — see `payout_dust`. Full policy: [PAYOUT_ROUNDING.md](./PAYOUT_ROUNDING.md) (issue #158).
+
+---
+
+### 5. `fee_collected`
+
+Emitted alongside `claim_winnings` on the **first** claim for a pool, to surface the protocol fee credited to the treasury.
+
+**Trigger:** `PredinexContract::claim_winnings` (first claim only — see [PAYOUT_ROUNDING.md](./PAYOUT_ROUNDING.md))
+
+**Topics tuple:**
+```
+(Symbol("fee_collected"), pool_id: u32)
+```
+
+**Data:**
+```
+fee: i128
+```
+
+| Field   | Type    | Description                                              |
+|---------|---------|----------------------------------------------------------|
+| `fee`   | `i128`  | Floor of `total_pool_balance * 2 / 100`, in raw token units |
+
+> Pre-#158 the `fee_collected` event was emitted on every claim, double-counting the fee for multi-winner pools. From #158 onward it is emitted exactly once per pool, so summing this event recovers actual protocol revenue.
+
+---
+
+### 6. `payout_dust`
+
+Emitted alongside `claim_winnings` on the **final** claim for a pool when integer-division rounding leaves residual dust. Surfaces the additional treasury credit beyond the 2 % fee.
+
+**Trigger:** `PredinexContract::claim_winnings` (final claim only — see [PAYOUT_ROUNDING.md](./PAYOUT_ROUNDING.md))
+
+**Topics tuple:**
+```
+(Symbol("payout_dust"), pool_id: u32)
+```
+
+**Data:**
+```
+payout_dust: i128
+```
+
+| Field         | Type    | Description                                                                                  |
+|---------------|---------|----------------------------------------------------------------------------------------------|
+| `payout_dust` | `i128`  | `net_pool_balance − Σ winnings`. Non-negative; strictly less than `n_winners` token units.   |
+
+When the per-claim floor division is exact for every winner, `payout_dust == 0` and **no** `payout_dust` event is emitted. To track total protocol revenue an indexer should sum `fee_collected.fee + payout_dust.payout_dust` across all pools.
+
 ---
 
 ## Parsing guide for frontend / indexers

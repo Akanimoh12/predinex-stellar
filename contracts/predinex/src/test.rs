@@ -2553,3 +2553,459 @@ fn l4_successful_claim_reconciles_treasury_and_balances() {
         "remaining contract balance must equal the unclaimed treasury fee"
     );
 }
+
+// ── Issue #158: Payout rounding and remainder handling ───────────────────────
+//
+// Policy under test:
+//   * Per-claim payout = floor(stake * net / pool_winning_total).
+//   * The 2 % protocol fee is credited to the treasury *once* (on the first
+//     claim).
+//   * Any payout-rounding dust left after every winner has claimed is swept
+//     into the treasury on the *final* claim. After that, the contract's
+//     token balance equals the recorded treasury exactly.
+//
+// Invariant: `total_pool_balance == fee + payout_dust + sum(payouts)`.
+
+/// AC #158.1: a pool whose payout division leaves a remainder follows the
+/// documented policy — dust is swept to the treasury on the final claim, and
+/// nothing is silently retained as orphaned contract balance.
+#[test]
+fn issue158_dust_left_by_floor_division_is_swept_to_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
+
+    let creator = Address::generate(&env);
+    let user_a1 = Address::generate(&env);
+    let user_a2 = Address::generate(&env);
+    let user_a3 = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    // Stakes are picked so the per-claim floor division produces visible
+    // dust:
+    //   total_pool_balance     = 100
+    //   fee                    = floor(100 * 2 / 100) = 2
+    //   net_pool_balance       = 98
+    //   pool_winning_total     = 30 (10 + 10 + 10)
+    //   formula winnings each  = floor(10 * 98 / 30) = 32
+    //   sum(winnings)          = 32 * 3 = 96
+    //   payout_dust            = 98 - 96 = 2
+    token_admin_client.mint(&user_a1, &10);
+    token_admin_client.mint(&user_a2, &10);
+    token_admin_client.mint(&user_a3, &10);
+    token_admin_client.mint(&user_b, &70);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Dust market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&user_a1, &pool_id, &0, &10);
+    client.place_bet(&user_a2, &pool_id, &0, &10);
+    client.place_bet(&user_a3, &pool_id, &0, &10);
+    client.place_bet(&user_b, &pool_id, &1, &70);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0); // outcome 0 wins
+
+    let total_pool_balance: i128 = 100;
+    let expected_fee: i128 = (total_pool_balance * 2) / 100; // 2
+    let net_pool_balance: i128 = total_pool_balance - expected_fee; // 98
+    let pool_winning_total: i128 = 30;
+    let expected_winnings_each: i128 = (10 * net_pool_balance) / pool_winning_total; // 32
+    let expected_payout_dust: i128 = net_pool_balance - expected_winnings_each * 3; // 2
+
+    // Sanity: the test setup actually produces non-zero dust.
+    assert!(expected_payout_dust > 0, "test must exercise the dust path");
+
+    // First claim: credits the fee, no dust yet.
+    let w1 = client.claim_winnings(&user_a1, &pool_id);
+    assert_eq!(w1, expected_winnings_each);
+    assert_eq!(
+        client.get_treasury_balance(),
+        expected_fee,
+        "first claim credits the fee"
+    );
+
+    // Second claim: still mid-flight, no fee re-credit, no dust yet.
+    let w2 = client.claim_winnings(&user_a2, &pool_id);
+    assert_eq!(w2, expected_winnings_each);
+    assert_eq!(
+        client.get_treasury_balance(),
+        expected_fee,
+        "fee must NOT be re-credited on subsequent claims"
+    );
+
+    // Third (final) claim: dust is swept to treasury, and contract balance
+    // reconciles with the recorded treasury exactly.
+    let w3 = client.claim_winnings(&user_a3, &pool_id);
+    assert_eq!(w3, expected_winnings_each);
+    assert_eq!(
+        client.get_treasury_balance(),
+        expected_fee + expected_payout_dust,
+        "final claim must add the payout dust to the treasury"
+    );
+    assert_eq!(
+        token.balance(&contract_id),
+        expected_fee + expected_payout_dust,
+        "contract balance must equal recorded treasury after every winner has claimed"
+    );
+}
+
+/// AC #158.2: total of winner payouts plus retained dust equals the original
+/// `net_pool_balance`. Same scenario as the previous test but framed as the
+/// reconciliation invariant.
+#[test]
+fn issue158_payouts_plus_dust_equals_net_pool_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
+
+    let creator = Address::generate(&env);
+    let users: [Address; 7] = core::array::from_fn(|_| Address::generate(&env));
+    // Asymmetric winning-side stakes so floor-division dust is non-zero.
+    let stakes: [i128; 7] = [3, 5, 7, 11, 13, 17, 19];
+    let loser_stake: i128 = 25;
+    for (u, s) in users.iter().zip(stakes.iter()) {
+        token_admin_client.mint(u, s);
+    }
+    let loser = Address::generate(&env);
+    token_admin_client.mint(&loser, &loser_stake);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Recon market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+    for (u, s) in users.iter().zip(stakes.iter()) {
+        client.place_bet(u, &pool_id, &0, s);
+    }
+    client.place_bet(&loser, &pool_id, &1, &loser_stake);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0);
+
+    let pool_winning_total: i128 = stakes.iter().sum();
+    let total_pool_balance: i128 = pool_winning_total + loser_stake;
+    let expected_fee: i128 = (total_pool_balance * 2) / 100;
+    let net_pool_balance: i128 = total_pool_balance - expected_fee;
+
+    let mut payouts_sum: i128 = 0;
+    for (u, s) in users.iter().zip(stakes.iter()) {
+        payouts_sum += client.claim_winnings(u, &pool_id);
+        // Sanity: per-claim payout follows the floor formula.
+        let expected = (s * net_pool_balance) / pool_winning_total;
+        assert!(
+            payouts_sum >= expected,
+            "individual payouts cannot decrease"
+        );
+    }
+
+    let recorded_treasury = client.get_treasury_balance();
+    let payout_dust = recorded_treasury - expected_fee;
+
+    // AC: payouts + dust == net_pool_balance.
+    assert_eq!(
+        payouts_sum + payout_dust,
+        net_pool_balance,
+        "sum(payouts) + payout_dust must equal net_pool_balance"
+    );
+    // And the broader reconciliation invariant.
+    assert_eq!(
+        payouts_sum + expected_fee + payout_dust,
+        total_pool_balance,
+        "fee + dust + sum(payouts) must equal total_pool_balance"
+    );
+    // Dust is at most n_winners - 1 token units.
+    assert!(
+        payout_dust >= 0 && payout_dust < stakes.len() as i128,
+        "dust must be non-negative and bounded by n_winners - 1"
+    );
+}
+
+/// A pool whose payout division has zero remainder must still reconcile —
+/// fee is credited once, no dust event is emitted.
+#[test]
+fn issue158_no_dust_when_payout_division_is_exact() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
+
+    let creator = Address::generate(&env);
+    let user_a1 = Address::generate(&env);
+    let user_a2 = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    // Stakes chosen so the floor-division payout is exact:
+    //   total = 200, fee = 4, net = 196
+    //   pool_winning_total = 100, each winner stakes 50
+    //   each payout = 50 * 196 / 100 = 98 (integer)
+    //   sum payouts = 196, dust = 0
+    token_admin_client.mint(&user_a1, &50);
+    token_admin_client.mint(&user_a2, &50);
+    token_admin_client.mint(&user_b, &100);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Exact market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+    client.place_bet(&user_a1, &pool_id, &0, &50);
+    client.place_bet(&user_a2, &pool_id, &0, &50);
+    client.place_bet(&user_b, &pool_id, &1, &100);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0);
+
+    let _ = client.claim_winnings(&user_a1, &pool_id);
+    let _ = client.claim_winnings(&user_a2, &pool_id);
+
+    let expected_fee: i128 = 4;
+    assert_eq!(client.get_treasury_balance(), expected_fee);
+    assert_eq!(
+        token.balance(&contract_id),
+        expected_fee,
+        "contract balance must equal exactly the fee when there is no dust"
+    );
+}
+
+/// The protocol fee is credited to the treasury exactly once per pool, even
+/// when several winners claim. Pre-#158 the fee was added on every claim,
+/// causing the recorded treasury to drift away from the actual contract
+/// token balance whenever a pool had more than one winner.
+#[test]
+fn issue158_fee_is_credited_only_once_across_multiple_claims() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
+
+    let creator = Address::generate(&env);
+    let user_a1 = Address::generate(&env);
+    let user_a2 = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    token_admin_client.mint(&user_a1, &50);
+    token_admin_client.mint(&user_a2, &50);
+    token_admin_client.mint(&user_b, &100);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Fee-once market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+    client.place_bet(&user_a1, &pool_id, &0, &50);
+    client.place_bet(&user_a2, &pool_id, &0, &50);
+    client.place_bet(&user_b, &pool_id, &1, &100);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0);
+
+    let total_pool_balance: i128 = 200;
+    let expected_fee: i128 = (total_pool_balance * 2) / 100; // 4
+
+    // First claim — fee credited.
+    let _ = client.claim_winnings(&user_a1, &pool_id);
+    assert_eq!(client.get_treasury_balance(), expected_fee);
+
+    // Second claim — fee must NOT be credited again. (Pre-#158 this would
+    // be `expected_fee * 2`.)
+    let _ = client.claim_winnings(&user_a2, &pool_id);
+    assert_eq!(
+        client.get_treasury_balance(),
+        expected_fee,
+        "fee must remain at exactly one fee unit"
+    );
+
+    // The recorded treasury matches the actual residual contract balance.
+    assert_eq!(token.balance(&contract_id), expected_fee);
+}
+
+/// Before any claim happens `get_pool_payout_state` returns `None`, and the
+/// state is written exactly once the first claim runs. After every winner
+/// has claimed `paid_out + (net - paid_out) == net`, matching the
+/// documented reconciliation invariant.
+#[test]
+fn issue158_pool_payout_state_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
+
+    let creator = Address::generate(&env);
+    let user_a1 = Address::generate(&env);
+    let user_a2 = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    token_admin_client.mint(&user_a1, &10);
+    token_admin_client.mint(&user_a2, &20);
+    token_admin_client.mint(&user_b, &70);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "State market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+    client.place_bet(&user_a1, &pool_id, &0, &10);
+    client.place_bet(&user_a2, &pool_id, &0, &20);
+    client.place_bet(&user_b, &pool_id, &1, &70);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0);
+
+    // Pre-claim: state is absent.
+    assert!(
+        client.get_pool_payout_state(&pool_id).is_none(),
+        "no state should exist before the first claim"
+    );
+
+    // After first claim: state is initialized, fee is credited, no dust yet.
+    let w1 = client.claim_winnings(&user_a1, &pool_id);
+    let s1 = client.get_pool_payout_state(&pool_id).unwrap();
+    assert_eq!(s1.claimed_winning_stake, 10);
+    assert_eq!(s1.paid_out, w1);
+    assert!(s1.fee_credited);
+
+    // After last claim: claimed_winning_stake equals pool_winning_total and
+    // the dust math reconciles.
+    let w2 = client.claim_winnings(&user_a2, &pool_id);
+    let s2 = client.get_pool_payout_state(&pool_id).unwrap();
+    assert_eq!(s2.claimed_winning_stake, 30);
+    assert_eq!(s2.paid_out, w1 + w2);
+
+    let total_pool_balance: i128 = 100;
+    let expected_fee: i128 = (total_pool_balance * 2) / 100;
+    let net_pool_balance: i128 = total_pool_balance - expected_fee;
+    let payout_dust = net_pool_balance - s2.paid_out;
+    assert_eq!(
+        client.get_treasury_balance(),
+        expected_fee + payout_dust,
+        "treasury must equal fee + final-claim dust"
+    );
+}
+
+/// The treasury-side bug the dust policy fixes: previously
+/// `withdraw_treasury` would happily debit the recorded treasury even though
+/// the actual contract balance held less, since the fee was double-counted.
+/// With the policy in place a multi-winner pool's withdrawal succeeds without
+/// over-drawing the contract balance.
+#[test]
+fn issue158_withdraw_treasury_works_after_multi_winner_pool_settles() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
+
+    let creator = Address::generate(&env);
+    let user_a1 = Address::generate(&env);
+    let user_a2 = Address::generate(&env);
+    let user_a3 = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    token_admin_client.mint(&user_a1, &10);
+    token_admin_client.mint(&user_a2, &10);
+    token_admin_client.mint(&user_a3, &10);
+    token_admin_client.mint(&user_b, &70);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Withdraw test"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+    client.place_bet(&user_a1, &pool_id, &0, &10);
+    client.place_bet(&user_a2, &pool_id, &0, &10);
+    client.place_bet(&user_a3, &pool_id, &0, &10);
+    client.place_bet(&user_b, &pool_id, &1, &70);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    client.settle_pool(&creator, &pool_id, &0);
+
+    client.claim_winnings(&user_a1, &pool_id);
+    client.claim_winnings(&user_a2, &pool_id);
+    client.claim_winnings(&user_a3, &pool_id);
+
+    let recorded_treasury = client.get_treasury_balance();
+    assert!(recorded_treasury > 0);
+
+    // The withdraw must move *exactly* `recorded_treasury` tokens to the
+    // recipient — no more, no less. Without the policy the contract would
+    // hold less than the recorded treasury for a dust-leaving pool.
+    client.withdraw_treasury(&treasury_recipient, &recorded_treasury);
+    assert_eq!(token.balance(&treasury_recipient), recorded_treasury);
+    assert_eq!(token.balance(&contract_id), 0);
+    assert_eq!(client.get_treasury_balance(), 0);
+}
