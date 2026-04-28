@@ -1,9 +1,16 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec};
 
-mod test;
-mod protocol_fee_tests;
 mod pause_tests;
+mod protocol_fee_tests;
+mod test;
+
+// ── Issue #193: Global contract configuration constants ───────────────────
+
+/// #151 — Minimum pool duration in seconds (1 hour).
+const MIN_POOL_DURATION_SECS: u64 = 3600;
+/// #151 — Maximum pool duration in seconds (~11.57 days).
+const MAX_POOL_DURATION: u64 = 1_000_000;
 
 // ── Issue #175: Event schema versioning ──────────────────────────────────────
 //
@@ -52,6 +59,10 @@ pub enum DataKey {
     /// #167 — protocol fee in basis points. Set by the treasury recipient via
     /// `set_protocol_fee`; defaults to 200 (2%) when absent.
     ProtocolFee,
+    /// #158 — per-pool payout tracking state.
+    PoolPayoutState(u32),
+    /// #175 — schema version marker for event compatibility.
+    SchemaVersion,
 }
 
 // #189 — TTL bump policy for persistent storage entries.
@@ -196,6 +207,40 @@ pub enum ClaimPreview {
     Claimable(i128),
 }
 
+/// #158 — Per-pool payout tracking state for reconciliation.
+///
+/// Tracks cumulative claimed winning stake and paid out amounts
+/// across multiple claims to enable fee-on-first-claim and dust-sweep-on-last.
+#[derive(Clone, Default, PartialEq)]
+#[contracttype]
+pub struct PoolPayoutState {
+    /// Whether the protocol fee has been credited to treasury for this pool.
+    /// The fee is credited only once, on the first winner claim.
+    pub fee_credited: bool,
+    /// Cumulative winning stake that has been claimed (in terms of the winner's
+    /// contribution to the winning side, not the payout amount).
+    pub claimed_winning_stake: i128,
+    /// Total payout amount that has been distributed to winners.
+    pub paid_out: i128,
+}
+
+/// Event payload emitted by `claim_winnings`.
+///
+/// Fields
+/// ------
+/// - `amount`        – tokens transferred to the claimant
+/// - `fee_amount`    – protocol fee credited to treasury (only on first claim)
+/// - `winning_outcome` – which outcome was declared the winner (0 or 1)
+/// - `total_pool_size` – total tokens in the pool at settlement time
+#[derive(Clone)]
+#[contracttype]
+pub struct ClaimEvent {
+    pub amount: i128,
+    pub fee_amount: i128,
+    pub winning_outcome: u32,
+    pub total_pool_size: i128,
+}
+
 /// Event payload emitted by `place_bet`.
 ///
 /// Fields
@@ -311,12 +356,12 @@ impl PredinexContract {
         if fee_bps < PROTOCOL_FEE_MIN_BPS || fee_bps > PROTOCOL_FEE_MAX_BPS {
             panic!("Fee out of bounds");
         }
-        env.storage().persistent().set(&DataKey::ProtocolFee, &fee_bps);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProtocolFee, &fee_bps);
 
-        env.events().publish(
-            (Symbol::new(&env, "protocol_fee_set"),),
-            (caller, fee_bps),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "protocol_fee_set"),), (caller, fee_bps));
     }
 
     /// #166 — Return the current protocol fee in basis points.
@@ -440,7 +485,7 @@ impl PredinexContract {
         let pool_id = Self::get_pool_counter(&env);
 
         if duration == 0 || duration > MAX_POOL_DURATION {
-            panic!(format!("Duration must be between 1 and {} seconds", MAX_POOL_DURATION));
+            panic!("Duration out of range");
         }
 
         let created_at = env.ledger().timestamp();
@@ -526,9 +571,15 @@ impl PredinexContract {
         token_client.transfer(&user, &env.current_contract_address(), &amount);
 
         if outcome == 0 {
-            pool.total_a = pool.total_a.checked_add(amount).expect("Pool total overflow");
+            pool.total_a = pool
+                .total_a
+                .checked_add(amount)
+                .expect("Pool total overflow");
         } else {
-            pool.total_b = pool.total_b.checked_add(amount).expect("Pool total overflow");
+            pool.total_b = pool
+                .total_b
+                .checked_add(amount)
+                .expect("Pool total overflow");
         }
 
         let mut user_bet = env
@@ -557,11 +608,20 @@ impl PredinexContract {
         );
 
         if outcome == 0 {
-            user_bet.amount_a = user_bet.amount_a.checked_add(amount).expect("User bet overflow");
+            user_bet.amount_a = user_bet
+                .amount_a
+                .checked_add(amount)
+                .expect("User bet overflow");
         } else {
-            user_bet.amount_b = user_bet.amount_b.checked_add(amount).expect("User bet overflow");
+            user_bet.amount_b = user_bet
+                .amount_b
+                .checked_add(amount)
+                .expect("User bet overflow");
         }
-        user_bet.total_bet = user_bet.total_bet.checked_add(amount).expect("User bet overflow");
+        user_bet.total_bet = user_bet
+            .total_bet
+            .checked_add(amount)
+            .expect("User bet overflow");
 
         env.storage()
             .persistent()

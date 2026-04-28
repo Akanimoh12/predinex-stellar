@@ -127,7 +127,10 @@ fn test_large_pool_payouts_with_checked_arithmetic() {
     client.settle_pool(&creator, &pool_id, &0);
 
     let winnings = client.claim_winnings(&user1, &pool_id);
-    assert!(winnings > 0, "Large pool winnings must compute successfully");
+    assert!(
+        winnings > 0,
+        "Large pool winnings must compute successfully"
+    );
     assert_eq!(token.balance(&user1), 100 + winnings);
 }
 
@@ -170,7 +173,10 @@ fn test_place_bet_rejects_pool_total_overflow() {
         client.place_bet(&user2, &pool_id, &0, &2);
     });
 
-    assert!(result.is_err(), "Pool total overflow should reject the second bet");
+    assert!(
+        result.is_err(),
+        "Pool total overflow should reject the second bet"
+    );
 }
 
 #[test]
@@ -2760,4 +2766,161 @@ fn l5_claim_winnings_emits_claim_event() {
 
     let expected_fee = (500i128 * 2) / 100;
     assert_eq!(claim_event.fee_amount, expected_fee);
+}
+
+// ============================================================================
+// Issue #183: Losing-side claim rejection tests
+//
+// The contract must reject claim attempts from bettors who backed the losing outcome.
+// This ensures losers cannot claim and prevents misleading user experiences.
+// ============================================================================
+
+/// H1: Losing bettor cannot claim winnings after pool is settled.
+#[test]
+#[should_panic(expected = "No winnings to claim")]
+fn h1_losing_bettor_cannot_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let winner = Address::generate(&env);
+    let loser = Address::generate(&env);
+
+    token_admin_client.mint(&winner, &1000);
+    token_admin_client.mint(&loser, &1000);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    // Winner bets on outcome A (0), loser bets on outcome B (1)
+    client.place_bet(&winner, &pool_id, &0, &100);
+    client.place_bet(&loser, &pool_id, &1, &100);
+
+    // Advance past expiry and settle with outcome A (0) winning
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+
+    client.settle_pool(&creator, &pool_id, &0);
+
+    // Loser attempts to claim — must fail with stable error
+    client.claim_winnings(&loser, &pool_id);
+}
+
+/// H2: Claim status returns NotEligible for losing bettor.
+#[test]
+fn h2_claim_status_is_not_eligible_for_loser() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let winner = Address::generate(&env);
+    let loser = Address::generate(&env);
+
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+    token_admin_client.mint(&winner, &1000);
+    token_admin_client.mint(&loser, &1000);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&winner, &pool_id, &0, &100);
+    client.place_bet(&loser, &pool_id, &1, &100);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+
+    client.settle_pool(&creator, &pool_id, &0);
+
+    let status = client.get_claim_status(&pool_id, &loser);
+    assert_eq!(status, ClaimStatus::NotEligible);
+}
+
+/// H3: Winner can claim while loser is rejected in the same pool.
+#[test]
+fn h3_winner_can_claim_while_loser_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let winner = Address::generate(&env);
+    let loser = Address::generate(&env);
+
+    token_admin_client.mint(&winner, &1000);
+    token_admin_client.mint(&loser, &1000);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&winner, &pool_id, &0, &100);
+    client.place_bet(&loser, &pool_id, &1, &100);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+
+    client.settle_pool(&creator, &pool_id, &0);
+
+    // Winner claims successfully
+    let winnings = client.claim_winnings(&winner, &pool_id);
+    assert!(winnings > 0, "winner must receive winnings");
+
+    // Loser attempt must fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.claim_winnings(&loser, &pool_id);
+    }));
+    assert!(result.is_err(), "loser claim must panic");
+
+    // Verify final state: winner got their payout, loser got nothing
+    let winner_balance = token.balance(&winner);
+    assert!(
+        winner_balance > 1000,
+        "winner balance must include winnings"
+    );
 }
